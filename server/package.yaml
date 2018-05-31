@@ -1,8 +1,6 @@
 name:                drawing-guessing-server
 version:             0.1.0.0
 category:            Web
-dependencies:
-- base >= 4.7 && < 5
 
 executables:
   dg:
@@ -12,3 +10,17 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N -I0
+    dependencies:
+      - base
+      - bytestring
+      - containers
+      - http-types
+      - mime-types
+      - random
+      - stm
+      - text
+      - wai
+      - wai-extra
+      - wai-websockets
+      - warp
+      - websockets
