@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE StrictData #-}
-{-# LANGUAGE TemplateHaskell #-}
 module Main
   ( main
   ) where
@@ -11,8 +10,6 @@ import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
-import Data.Aeson
-import Data.Aeson.TH (defaultOptions, deriveJSON)
 import Data.Function
 import qualified Data.IntMap as IM
 import qualified Data.List as List
@@ -29,6 +26,7 @@ import Network.WebSockets
 import System.Random.MWC
 import System.Random.MWC.Distributions (uniformShuffle)
 import Text.Read (readMaybe)
+import Types
 import qualified WordLists
 
 --------------------------------------------------------------------------------
@@ -118,25 +116,6 @@ data Room = Room
 
 type ServerState = IM.IntMap Room
 
-data Msg = TellRoomId Int
-         | ToldStartGame
-         | AnnounceRound Int T.Text -- ^ Round number and drawer
-         | TellDrawerWord T.Text
-         | AnnounceWordLength Int
-         | GotDrawingCmd T.Text
-         | RelayDrawingCmd T.Text
-         | GotGuess T.Text
-         | ReplyGuessIncorrect
-         | EndRoundWithWinner T.Text
-         | EndRoundWithoutWinner
-         | AnnounceTimeLeft Int
-
-instance WebSocketsData Msg where
-  toLazyByteString = toLazyByteString . encode
-  fromLazyByteString bs = fromMaybe (error "unparsable message") (decode bs)
-  fromDataMessage (Binary bs) = fromMaybe (error "unparsable message") (decode bs)
-  fromDataMessage (Text bs _) = fromMaybe (error "unparsable message") (decode bs)
-
 beginConnection ::
      (Connection -> TVar ServerState -> IM.Key -> IO b)
   -> TVar ServerState
@@ -223,4 +202,3 @@ beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
       Left _ -> broadcast EndRoundWithoutWinner
       Right w -> broadcast (EndRoundWithWinner w)
 
-$(deriveJSON defaultOptions ''Msg)
