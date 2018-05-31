@@ -4,6 +4,7 @@ module Types where
 import Data.Aeson
 import Data.Aeson.TH (defaultOptions, deriveJSON)
 import Data.Maybe
+import qualified Data.Sequence as Seq
 import qualified Data.Text as T
 import Network.WebSockets
 
@@ -22,6 +23,7 @@ data Msg
   | EndRoundWithWinner T.Text
   | EndRoundWithoutWinner
   | AnnounceTimeLeft Int
+  | EndGameWithTally (Seq.Seq (Maybe T.Text))
   deriving (Show, Read)
 
 $(deriveJSON defaultOptions ''Msg)
