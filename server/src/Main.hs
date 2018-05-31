@@ -126,7 +126,7 @@ beginConnection ::
   -> IO b
 beginConnection cont st rid cid pending = do
   conn <- acceptRequest pending
-  forkPingThread conn 30
+  forkPingThread conn 1
   atomically $
     modifyTVar'
       st
@@ -155,6 +155,22 @@ whileM_ p f = go
   where go = do
           x <- p
           if x then f >> go else pure ()
+
+receivePossibleData :: WebSocketsData a => Connection -> IO (Maybe a)
+receivePossibleData conn = do
+  msg <- receive conn
+  case msg of
+    DataMessage _ _ _ am -> pure (Just (fromDataMessage am))
+    ControlMessage cm ->
+      case cm of
+        Close i closeMsg -> do
+          sendClose conn closeMsg
+          throwIO $ CloseRequest i closeMsg
+        Pong _ -> pure Nothing
+        Ping pl -> do
+          send conn (ControlMessage (Pong pl))
+          pure Nothing
+
 
 beginGame :: TVar ServerState -> Int -> IO ()
 beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
@@ -190,16 +206,15 @@ beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
 
           drawerThread :: Connection -> IO ()
           drawerThread conn = whileM_ shouldContinue $ do
-            d <- receiveData conn
+            d <- receivePossibleData conn
             case d of
-              GotDrawingCmd t -> atomically $ writeTChan drawingChan t
-              GotRefresh -> pure () -- Okay. This is because we can't interrupt 'receiveData'.
+              Just (GotDrawingCmd t) -> atomically $ writeTChan drawingChan t
+              Nothing -> pure ()
               _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
           guesserThread :: T.Text -> Connection -> IO ()
           guesserThread name conn = whileM_ shouldContinue $ do
             chan <- atomically $ dupTChan drawingChan
-            rcvdBuf <- newEmptyTMVarIO
             let relayThread = do
                   tt <- atomically ((Right <$> readTChan chan) `orElse` (Left () <$ readTMVar winner) `orElse` (Left <$> readTMVar timerExpiration))
                   case tt of
@@ -207,17 +222,11 @@ beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
                     Left _ -> pure ()
 
                 readerThread = whileM_ shouldContinue $ do
-                  -- Wait till the rcvdBuf is empty
-                  atomically $ do
-                    e <- isEmptyTMVar rcvdBuf
-                    if e
-                      then pure ()
-                      else retry
-                  d <- receiveData conn
+                  d <- receivePossibleData conn
                   case d of
-                    GotGuess w | w == wd -> atomically (putTMVar winner name)
-                               | otherwise -> sendTextData conn ReplyGuessIncorrect
-                    GotRefresh -> pure () -- Okay. This is because we can't interrupt 'receiveData'.
+                    Just (GotGuess w) | w == wd -> atomically (putTMVar winner name)
+                                      | otherwise -> sendTextData conn ReplyGuessIncorrect
+                    Nothing -> pure () -- Okay. This is because we can't interrupt 'receiveData'.
                     _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
             concurrently_ relayThread readerThread
