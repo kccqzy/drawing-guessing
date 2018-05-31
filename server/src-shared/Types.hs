@@ -10,6 +10,7 @@ import Network.WebSockets
 data Msg
   = TellRoomId Int
   | ToldStartGame
+  | ToldStartRound
   | AnnounceRound Int
                   T.Text -- ^ Round number and drawer
   | TellDrawerWord T.Text

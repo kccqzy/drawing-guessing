@@ -173,12 +173,17 @@ beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
   let broadcastTo who msg = forM_ who $ \(_, (_, _, _, conn)) ->  sendTextData conn msg
       broadcast = broadcastTo clients'
 
-  forM_ (zip [0 ..] clients') $ \(roundNo, roundDrawer@(_, (drawerName, drawerChan, _, drawerConn))) -> do
+  forM_ (zip [0 ..] clients') $ \(roundNo, roundDrawer@(_, (drawerName, drawerQueue, _, drawerConn))) -> do
     let guessers = List.deleteBy ((==) `on` fst) roundDrawer clients'
         broadcastGuessers = broadcastTo guessers
 
     broadcast (AnnounceRound roundNo drawerName)
     let wd = wordlist V.! (roundNo `mod` V.length wordlist)
+    ss <- atomically (readTQueue drawerQueue)
+    case ss of
+      ToldStartRound -> pure ()
+      _ -> throwIO (ErrorCall "Malicious client: State violation.")
+
     sendTextData drawerConn (TellDrawerWord wd)
     broadcastGuessers (AnnounceWordLength (T.length wd))
 
@@ -194,7 +199,7 @@ beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
       winner <- newEmptyTMVarIO
 
       let drawerThread conn = do
-            d <- atomically (raceSTM (readTQueue drawerChan) (readTMVar winner))
+            d <- atomically (raceSTM (readTQueue drawerQueue) (readTMVar winner))
             case d of
               Right _ -> pure ()
               Left (GotDrawingCmd t) -> atomically (writeTChan drawingChan t) >> drawerThread conn
