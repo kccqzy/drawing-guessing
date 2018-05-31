@@ -21,6 +21,8 @@ data Msg
   | EndRoundWithWinner T.Text
   | EndRoundWithoutWinner
   | AnnounceTimeLeft Int
+  | GotRefresh -- ^ A stupid message only there because we can't interrupt read
+  deriving (Show, Read)
 
 $(deriveJSON defaultOptions ''Msg)
 

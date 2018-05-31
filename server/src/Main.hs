@@ -5,7 +5,8 @@ module Main
   ( main
   ) where
 
-import Control.Concurrent (threadDelay)
+import Control.Applicative
+import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Exception
@@ -145,7 +146,9 @@ newRoom = beginConnection $ \conn st rid -> do
     _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
 joinRoom :: TVar ServerState -> Int -> Int -> ServerApp
-joinRoom = beginConnection $ \_ _ _ -> pure ()
+joinRoom = beginConnection $ \_ st rid -> atomically $ do
+  rooms <- readTVar st
+  when (IM.member rid rooms) retry -- TODO make it be blocked on an MVar/TMVar for performance
 
 whileM_ :: Monad m => m Bool -> m a -> m ()
 whileM_ p f = go
@@ -170,35 +173,62 @@ beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
     sendTextData (fromJust drawerConn) (TellDrawerWord wd)
     broadcastGuessers (AnnounceWordLength (T.length wd))
 
-    let timer = forM_ (enumFromThenTo 9 8 1) $ \decaSeconds -> do
-          threadDelay 10000000
-          broadcast (AnnounceTimeLeft (decaSeconds * 10))
-    r <- race timer $ do
+    timerExpiration <- newEmptyTMVarIO
+    let timerThread = do
+          forM_ (enumFromThenTo 8 7 0) $ \decaSeconds -> do
+            threadDelay 10000000
+            broadcast (AnnounceTimeLeft (decaSeconds * 10))
+          atomically $ putTMVar timerExpiration ()
+
+    r <- withAsync timerThread $ \timer -> do
       -- Within the time limit of 90 seconds, we either try to receive a drawing
       -- command from the drawer or a guess from the guessers.
       drawingChan <- newBroadcastTChanIO
       winner <- newEmptyTMVarIO
-      let drawerThread conn = whileM_ (atomically $ isEmptyTMVar winner) $ do
+
+      let shouldContinue = atomically $ liftA2 (&&) (isEmptyTMVar winner) (isEmptyTMVar timerExpiration)
+
+          drawerThread :: Connection -> IO ()
+          drawerThread conn = whileM_ shouldContinue $ do
             d <- receiveData conn
             case d of
               GotDrawingCmd t -> atomically $ writeTChan drawingChan t
+              GotRefresh -> pure () -- Okay. This is because we can't interrupt 'receiveData'.
               _ -> throwIO (ErrorCall "Malicious client: State violation.")
-          guesserThread name conn = do
+
+          guesserThread :: T.Text -> Connection -> IO ()
+          guesserThread name conn = whileM_ shouldContinue $ do
             chan <- atomically $ dupTChan drawingChan
-            whileM_ (atomically $ isEmptyTMVar winner) $ do
-              ed <- race (receiveData conn) (atomically (readTChan chan))
-              case ed of
-                Right t -> sendTextData conn (RelayDrawingCmd t)
-                Left (GotGuess w) | w == wd -> atomically (putTMVar winner name)
-                                  | otherwise -> sendTextData conn ReplyGuessIncorrect
-                Left _ -> throwIO (ErrorCall "Malicious client: State violation.")
+            rcvdBuf <- newEmptyTMVarIO
+            let relayThread = do
+                  tt <- atomically ((Right <$> readTChan chan) `orElse` (Left () <$ readTMVar winner) `orElse` (Left <$> readTMVar timerExpiration))
+                  case tt of
+                    Right t -> sendTextData conn (RelayDrawingCmd t) >> relayThread
+                    Left _ -> pure ()
+
+                readerThread = whileM_ shouldContinue $ do
+                  -- Wait till the rcvdBuf is empty
+                  atomically $ do
+                    e <- isEmptyTMVar rcvdBuf
+                    if e
+                      then pure ()
+                      else retry
+                  d <- receiveData conn
+                  case d of
+                    GotGuess w | w == wd -> atomically (putTMVar winner name)
+                               | otherwise -> sendTextData conn ReplyGuessIncorrect
+                    GotRefresh -> pure () -- Okay. This is because we can't interrupt 'receiveData'.
+                    _ -> throwIO (ErrorCall "Malicious client: State violation.")
+
+            concurrently_ relayThread readerThread
 
           actions = drawerThread (fromJust drawerConn) : map (\(_, Client name conn) -> guesserThread name (fromJust conn)) guessers
 
       mapConcurrently_ id actions
-      w <- atomically (readTMVar winner)
+      w <- atomically ((Right <$> readTMVar winner) `orElse` (Left <$> takeTMVar timerExpiration))
+      cancel timer
       pure w
     case r of
       Left _ -> broadcast EndRoundWithoutWinner
       Right w -> broadcast (EndRoundWithWinner w)
-
+  atomically $ modifyTVar' st (IM.delete rid)
