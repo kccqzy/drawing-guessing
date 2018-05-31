@@ -118,7 +118,7 @@ data Room = Room
 type ServerState = IM.IntMap Room
 
 beginConnection ::
-     (Connection -> TVar ServerState -> IM.Key -> IO b)
+     (Connection -> TVar ServerState -> Int -> IO b)
   -> TVar ServerState
   -> IM.Key
   -> IM.Key
@@ -126,14 +126,25 @@ beginConnection ::
   -> IO b
 beginConnection cont st rid cid pending = do
   conn <- acceptRequest pending
-  forkPingThread conn 1
   atomically $
     modifyTVar'
       st
       (IM.adjust
          (\Room {..} -> Room {rClients = IM.adjust (\Client {..} -> Client {cConn = Just conn, ..}) cid rClients, ..})
          rid)
-  cont conn st rid
+
+  finish <- newEmptyTMVarIO
+  withAsync (forever (ping conn finish)) $ \_ ->
+    cont conn st rid `finally` atomically (putTMVar finish ())
+  where ping conn finish = go 0
+          where go :: Int -> IO ()
+                go i = do
+                  threadDelay 1000000
+                  sendPing conn (T.pack (show i))
+                  f <- atomically (tryTakeTMVar finish)
+                  case f of
+                    Nothing -> go (i + 1)
+                    Just _ -> pure ()
 
 newRoom :: TVar ServerState -> Int -> Int -> ServerApp
 newRoom = beginConnection $ \conn st rid -> do
@@ -143,18 +154,30 @@ newRoom = beginConnection $ \conn st rid -> do
     ToldStartGame -> do
       atomically $ modifyTVar' st (IM.adjust (\Room{..} -> Room {rJoinable = False, ..}) rid)
       beginGame st rid
+      sendClose conn ("Goodbye!" :: T.Text)
+      waitClose conn
     _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
 joinRoom :: TVar ServerState -> Int -> Int -> ServerApp
-joinRoom = beginConnection $ \_ st rid -> atomically $ do
-  rooms <- readTVar st
-  when (IM.member rid rooms) retry -- TODO make it be blocked on an MVar/TMVar for performance
+joinRoom = beginConnection $ \conn st rid -> do
+  atomically $ do
+    rooms <- readTVar st
+    when (IM.member rid rooms) retry -- TODO make it be blocked on an MVar/TMVar for performance
+  sendClose conn ("Goodbye!" :: T.Text)
+  waitClose conn
 
 whileM_ :: Monad m => m Bool -> m a -> m ()
 whileM_ p f = go
   where go = do
           x <- p
           if x then f >> go else pure ()
+
+waitClose :: Connection -> IO ()
+waitClose conn = do
+  msg <- receive conn
+  case msg of
+    ControlMessage (Close _ _) -> pure ()
+    _ -> waitClose conn
 
 receivePossibleData :: WebSocketsData a => Connection -> IO (Maybe a)
 receivePossibleData conn = do
