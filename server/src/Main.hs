@@ -5,7 +5,6 @@ module Main
   ( main
   ) where
 
-import Control.Applicative
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.STM
@@ -126,25 +125,14 @@ beginConnection ::
   -> IO b
 beginConnection cont st rid cid pending = do
   conn <- acceptRequest pending
+  forkPingThread conn 30
   atomically $
     modifyTVar'
       st
       (IM.adjust
          (\Room {..} -> Room {rClients = IM.adjust (\Client {..} -> Client {cConn = Just conn, ..}) cid rClients, ..})
          rid)
-
-  finish <- newEmptyTMVarIO
-  withAsync (forever (ping conn finish)) $ \_ ->
-    cont conn st rid `finally` atomically (putTMVar finish ())
-  where ping conn finish = go 0
-          where go :: Int -> IO ()
-                go i = do
-                  threadDelay 1000000
-                  sendPing conn (T.pack (show i))
-                  f <- atomically (tryTakeTMVar finish)
-                  case f of
-                    Nothing -> go (i + 1)
-                    Just _ -> pure ()
+  cont conn st rid
 
 newRoom :: TVar ServerState -> Int -> Int -> ServerApp
 newRoom = beginConnection $ \conn st rid -> do
@@ -154,113 +142,85 @@ newRoom = beginConnection $ \conn st rid -> do
     ToldStartGame -> do
       atomically $ modifyTVar' st (IM.adjust (\Room{..} -> Room {rJoinable = False, ..}) rid)
       beginGame st rid
-      sendClose conn ("Goodbye!" :: T.Text)
-      waitClose conn
     _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
 joinRoom :: TVar ServerState -> Int -> Int -> ServerApp
-joinRoom = beginConnection $ \conn st rid -> do
+joinRoom = beginConnection $ \_ st rid ->
   atomically $ do
     rooms <- readTVar st
     when (IM.member rid rooms) retry -- TODO make it be blocked on an MVar/TMVar for performance
-  sendClose conn ("Goodbye!" :: T.Text)
-  waitClose conn
 
-whileM_ :: Monad m => m Bool -> m a -> m ()
-whileM_ p f = go
-  where go = do
-          x <- p
-          if x then f >> go else pure ()
-
-waitClose :: Connection -> IO ()
-waitClose conn = do
-  msg <- receive conn
-  case msg of
-    ControlMessage (Close _ _) -> pure ()
-    _ -> waitClose conn
-
-receivePossibleData :: WebSocketsData a => Connection -> IO (Maybe a)
-receivePossibleData conn = do
-  msg <- receive conn
-  case msg of
-    DataMessage _ _ _ am -> pure (Just (fromDataMessage am))
-    ControlMessage cm ->
-      case cm of
-        Close i closeMsg -> do
-          sendClose conn closeMsg
-          throwIO $ CloseRequest i closeMsg
-        Pong _ -> pure Nothing
-        Ping pl -> do
-          send conn (ControlMessage (Pong pl))
-          pure Nothing
-
+raceSTM :: STM a -> STM b -> STM (Either a b)
+raceSTM a b = (Left <$> a) `orElse` (Right <$> b)
 
 beginGame :: TVar ServerState -> Int -> IO ()
 beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
   clients <- (IM.toList . rClients . (IM.! rid)) <$> readTVarIO st
   wordlist <- uniformShuffle WordLists.animals rng
 
-  let broadcastTo who msg = forM_ who $ \(_, Client _ conn) -> maybe (pure ()) (`sendTextData` msg) conn
-      broadcast = broadcastTo clients
+  -- We assume it is safe to call `receiveData` and `sendTextData` at the same
+  -- time. The main design complication is that `receiveData` cannot be
+  -- interrupted, therefore we cannot simply use `race` such as `race
+  -- (receiveData conn) (atomically (readTChan chan))`. So in terms of design,
+  -- we will have a thread to read from each of the clients, and then
+  -- communicate with this over a channel.
 
-  forM_ (zip [0 ..] clients) $ \(roundNo, roundDrawer@(_, Client drawerName drawerConn)) -> do
-    let guessers = List.deleteBy ((==) `on` fst) roundDrawer clients
+  clients' <- forM clients $ \(cid, Client name conn) -> do
+    receiveQueue <- newTQueueIO
+    receiver <- async $ forever $ receiveData (fromJust conn) >>= atomically . writeTQueue receiveQueue
+    pure (cid, (name, receiveQueue, receiver, fromJust conn))
+
+  let broadcastTo who msg = forM_ who $ \(_, (_, _, _, conn)) ->  sendTextData conn msg
+      broadcast = broadcastTo clients'
+
+  forM_ (zip [0 ..] clients') $ \(roundNo, roundDrawer@(_, (drawerName, drawerChan, _, drawerConn))) -> do
+    let guessers = List.deleteBy ((==) `on` fst) roundDrawer clients'
         broadcastGuessers = broadcastTo guessers
 
     broadcast (AnnounceRound roundNo drawerName)
     let wd = wordlist V.! (roundNo `mod` V.length wordlist)
-    sendTextData (fromJust drawerConn) (TellDrawerWord wd)
+    sendTextData drawerConn (TellDrawerWord wd)
     broadcastGuessers (AnnounceWordLength (T.length wd))
 
-    timerExpiration <- newEmptyTMVarIO
-    let timerThread = do
+    let timerThread =
           forM_ (enumFromThenTo 8 7 0) $ \decaSeconds -> do
             threadDelay 10000000
             broadcast (AnnounceTimeLeft (decaSeconds * 10))
-          atomically $ putTMVar timerExpiration ()
 
-    r <- withAsync timerThread $ \timer -> do
+    r <- race timerThread $ do
       -- Within the time limit of 90 seconds, we either try to receive a drawing
       -- command from the drawer or a guess from the guessers.
       drawingChan <- newBroadcastTChanIO
       winner <- newEmptyTMVarIO
 
-      let shouldContinue = atomically $ liftA2 (&&) (isEmptyTMVar winner) (isEmptyTMVar timerExpiration)
-
-          drawerThread :: Connection -> IO ()
-          drawerThread conn = whileM_ shouldContinue $ do
-            d <- receivePossibleData conn
+      let drawerThread conn = do
+            d <- atomically (raceSTM (readTQueue drawerChan) (readTMVar winner))
             case d of
-              Just (GotDrawingCmd t) -> atomically $ writeTChan drawingChan t
-              Nothing -> pure ()
+              Right _ -> pure ()
+              Left (GotDrawingCmd t) -> atomically (writeTChan drawingChan t) >> drawerThread conn
               _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
-          guesserThread :: T.Text -> Connection -> IO ()
-          guesserThread name conn = whileM_ shouldContinue $ do
+          guesserThread name readQueue conn = do
             chan <- atomically $ dupTChan drawingChan
-            let relayThread = do
-                  tt <- atomically ((Right <$> readTChan chan) `orElse` (Left () <$ readTMVar winner) `orElse` (Left <$> readTMVar timerExpiration))
-                  case tt of
-                    Right t -> sendTextData conn (RelayDrawingCmd t) >> relayThread
-                    Left _ -> pure ()
+            -- A triple race between: (a) winner found, (b) got message from the drawing chan, (c) got message from the read queue
+            d <- atomically (raceSTM (raceSTM (readTQueue readQueue) (readTChan chan)) (readTMVar winner))
+            case d of
+              Right _ -> pure ()
+              Left (Right t) -> sendTextData conn (RelayDrawingCmd t) >> guesserThread name readQueue conn
+              Left (Left (GotGuess w)) | w == wd -> atomically (putTMVar winner name)
+                                       | otherwise -> sendTextData conn ReplyGuessIncorrect
+              _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
-                readerThread = whileM_ shouldContinue $ do
-                  d <- receivePossibleData conn
-                  case d of
-                    Just (GotGuess w) | w == wd -> atomically (putTMVar winner name)
-                                      | otherwise -> sendTextData conn ReplyGuessIncorrect
-                    Nothing -> pure () -- Okay. This is because we can't interrupt 'receiveData'.
-                    _ -> throwIO (ErrorCall "Malicious client: State violation.")
-
-            concurrently_ relayThread readerThread
-
-          actions = drawerThread (fromJust drawerConn) : map (\(_, Client name conn) -> guesserThread name (fromJust conn)) guessers
+          actions = drawerThread drawerConn : map (\(_, (name, readQueue, _, conn)) -> guesserThread name readQueue conn) guessers
 
       mapConcurrently_ id actions
-      w <- atomically ((Right <$> readTMVar winner) `orElse` (Left <$> takeTMVar timerExpiration))
-      cancel timer
-      pure w
+      atomically (readTMVar winner)
     case r of
       Left _ -> broadcast EndRoundWithoutWinner
       Right w -> broadcast (EndRoundWithWinner w)
+    forM_ clients' $ \(_, (_, queue, _, _)) -> atomically (void (flushTQueue queue))
   atomically $ modifyTVar' st (IM.delete rid)
+  forConcurrently_ clients' $ \(_, (_, _, receiver, conn)) -> do
+    sendClose conn ("Goodbye!" :: T.Text)
+    threadDelay 2000000
+    cancel receiver
