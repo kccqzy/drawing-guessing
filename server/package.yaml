@@ -46,6 +46,7 @@ executables:
       - drawing-guessing-server
       - http-types
       - mime-types
+      - network-uri
       - text
       - vector
       - websockets
