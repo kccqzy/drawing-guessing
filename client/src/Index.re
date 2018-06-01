@@ -14,60 +14,139 @@ type statelessComp =
 type reducerComp('s, 'a) =
   componentSpec('s, 's, noRetainedProps, noRetainedProps, 'a);
 
-module Component1: {let make: (~message: string, 'a) => statelessComp;} = {
-  let component = statelessComponent("Page");
-  let make = (~message, _children) => {
-    ...component,
-    render: (_) => <div> (string(message)) </div>,
-  };
-};
+let targetVal = e => D.domElementToObj(ReactEventRe.Form.target(e))##value;
 
-module Component2: {
+module Page: {
   type state;
   type action;
-  let make: (~greeting: string, 'a) => reducerComp(state, action);
+  let make: 'a => reducerComp(state, action);
 } = {
+  type stage =
+    | ChooseNewJoin
+    | NewGame
+    | JoinGame
+    | InGame;
   type state = {
-    count: int,
-    show: bool,
+    stage,
+    nick: string,
+    rid: string,
   };
   type action =
-    | Click
-    | Toggle;
-  let component = reducerComponent("Example");
-  let make = (~greeting, _children) => {
+    | DidSelectNewGame
+    | DidSelectJoinGame
+    | DidStartGame
+    | DidUpdateNickname(string)
+    | DidUpdateRoomId(string);
+  let component = reducerComponent("Page");
+  let make = (_) => {
     ...component,
-    initialState: (_) => {count: 0, show: true},
+    initialState: (_) => {stage: ChooseNewJoin, nick: "", rid: ""},
     reducer: (action, state) =>
       switch (action) {
-      | Click => Update({...state, count: state.count + 1})
-      | Toggle => Update({...state, show: ! state.show})
+      | DidSelectNewGame => Update({...state, stage: NewGame})
+      | DidSelectJoinGame => Update({...state, stage: JoinGame})
+      | DidStartGame => Update({...state, stage: InGame})
+      | DidUpdateNickname(nick) => Update({...state, nick})
+      | DidUpdateRoomId(rid) => Update({...state, rid})
       },
     render: self => {
-      let message =
-        "You've clicked this "
-        ++ string_of_int(self.state.count)
-        ++ " times(s)";
-      <div>
-        <button onClick=(_event => self.send(Click))>
-          (string(message))
-        </button>
-        <button onClick=(_event => self.send(Toggle))>
-          (string("Toggle greeting"))
-        </button>
-        <p> (self.state.show ? string(greeting) : null) </p>
+      let atoi = s =>
+        try (Some(int_of_string(s))) {
+        | Failure(_) => None
+        };
+      <div id="Page" className="container-fluid">
+        (
+          switch (self.state.stage) {
+          | ChooseNewJoin =>
+            <div>
+              <h1> (string("Drawing and Guessing")) </h1>
+              <button
+                type_="button"
+                className="btn btn-primary btn-lg btn-block"
+                onClick=((_) => self.send(DidSelectNewGame))>
+                (string("New Game"))
+              </button>
+              <button
+                type_="button"
+                className="btn btn-primary btn-lg btn-block"
+                onClick=((_) => self.send(DidSelectJoinGame))>
+                (string("Join Game"))
+              </button>
+            </div>
+          | NewGame =>
+            <div>
+              <h1> (string("Create A New Game")) </h1>
+              <div className="form-group">
+                <label htmlFor="nickname"> (string("Nickname")) </label>
+                <input
+                  type_="text"
+                  className="form-control"
+                  id="nickname"
+                  placeholder="Your Nickname"
+                  value=self.state.nick
+                  onChange=(e => self.send(DidUpdateNickname(targetVal(e))))
+                />
+              </div>
+              <button
+                onClick=((_) => self.send(DidStartGame))
+                type_="button"
+                className="btn btn-primary btn-lg btn-block">
+                (string("New Game"))
+              </button>
+            </div>
+          | JoinGame =>
+            <div>
+              <h1> (string("Join A Game")) </h1>
+              <div className="form-group">
+                <label htmlFor="nickname"> (string("Nickname")) </label>
+                <input
+                  type_="text"
+                  className="form-control"
+                  id="nickname"
+                  placeholder="Your Nickname"
+                  value=self.state.nick
+                  onChange=(e => self.send(DidUpdateNickname(targetVal(e))))
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="rid"> (string("Game PIN")) </label>
+                <input
+                  type_="number"
+                  className="form-control"
+                  id="rid"
+                  placeholder="Game PIN"
+                  value=self.state.rid
+                  onChange=(
+                    e => {
+                      let value = targetVal(e);
+                      if (value == "") {
+                        self.send(DidUpdateRoomId(value));
+                      } else {
+                        switch (atoi(value)) {
+                        | Some(n) when 1 <= n && n <= 9999999 =>
+                          self.send(DidUpdateRoomId(value))
+                        | _ => ()
+                        };
+                      };
+                    }
+                  )
+                />
+              </div>
+              <button
+                onClick=((_) => self.send(DidStartGame))
+                type_="button"
+                className="btn btn-primary btn-lg btn-block">
+                (string("Join Game"))
+              </button>
+            </div>
+          | InGame => <div />
+          }
+        )
       </div>;
     },
   };
 };
 
 let () = {
-  D.renderToElementWithId(
-    element(Component1.make(~message="Hello!", [||])),
-    "index1",
-  );
-  D.renderToElementWithId(
-    element(Component2.make(~greeting="Hello!", [||])),
-    "index2",
-  );
+  D.renderToElementWithId(element(Page.make([||])), "main");
 };
