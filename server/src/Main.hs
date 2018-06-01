@@ -12,7 +12,6 @@ import Control.Exception
 import Control.Monad
 import qualified Data.IntMap as IM
 import qualified Data.List as List
-import Data.Maybe
 import qualified Data.Sequence as Seq
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8)
@@ -119,9 +118,9 @@ newRoom = beginConnection $ \conn st rid nick -> do
   sendTextData conn (TellRoomId rid)
   d <- receiveData conn
   case d of
-    ToldStartGame -> do
+    ToldStartGame rounds -> do
       atomically $ modifyTVar' st (IM.adjust (\Room {..} -> Room {rJoinable = False, ..}) rid)
-      beginGame st rid
+      beginGame st rid rounds
     _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
 joinRoom :: TVar ServerState -> Int -> T.Text -> ServerApp
@@ -143,8 +142,8 @@ joinRoom = beginConnection $ \conn st rid nick -> do
 raceSTM :: STM a -> STM b -> STM (Either a b)
 raceSTM a b = (Left <$> a) `orElse` (Right <$> b)
 
-beginGame :: TVar ServerState -> Int -> IO ()
-beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
+beginGame :: TVar ServerState -> Int -> Int -> IO ()
+beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
   clients <- (rClients . (IM.! rid)) <$> readTVarIO st
   wordlist <- uniformShuffle WordLists.animals rng
 
@@ -163,7 +162,7 @@ beginGame st rid = withSystemRandom . asGenIO $ \rng -> do
   let broadcastTo who msg = forM_ who $ \(_, _, _, conn) ->  sendTextData conn msg
       broadcast = broadcastTo clients'
 
-  result <- flip Seq.traverseWithIndex clients' $ \roundNo (drawerName, drawerQueue, _, drawerConn) -> do
+  result <- flip Seq.traverseWithIndex (Seq.cycleTaking rounds clients') $ \roundNo (drawerName, drawerQueue, _, drawerConn) -> do
     let guessers = Seq.deleteAt roundNo clients'
         broadcastGuessers = broadcastTo guessers
 
