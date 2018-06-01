@@ -9,6 +9,7 @@
     "webpack:production": "NODE_ENV=production webpack"
   },
   "dependencies": {
+    "@glennsl/bs-json": "^2.0.0",
     "bs-webapi": "^0.9.1",
     "react": "^16.2.0",
     "react-dom": "^16.2.0",

@@ -16,46 +16,89 @@ type reducerComp('s, 'a) =
 
 let targetVal = e => ReactDOMRe.domElementToObj(ReactEventRe.Form.target(e))##value;
 
-module Game: {
+module GameStateMachine: {
   type gametype =
     | NewGame(string)
     | JoinGame(string, int);
-  type state;
-  type action;
-  let make: (~gametype: gametype, 'a) => reducerComp(state, action);
+  type gamestate =
+    | Invalid
+    | WaitForRoomId
+    | WaitForGameStart(int);
+  let create: gametype => gamestate;
+  let transition: (gamestate, Js.Json.t) => option(gamestate);
 } = {
   type gametype =
     | NewGame(string)
     | JoinGame(string, int);
+  type gamestate =
+    | Invalid
+    | WaitForRoomId
+    | WaitForGameStart(int);
+  let create =
+    fun
+    | NewGame(_) => WaitForRoomId
+    | JoinGame(_, rid) => WaitForGameStart(rid);
+  let transition = (st, js) => {
+    module JD = Json.Decode;
+    switch (js |> JD.(field("tag", JD.string)), st) {
+    | ("TellRoomId", WaitForRoomId) =>
+      Some(WaitForGameStart(js |> JD.(field("contents", int))))
+    | _ => None
+    };
+  };
+};
+
+module Game: {
+  type state;
+  type action;
+  let make:
+    (~gametype: GameStateMachine.gametype, 'a) => reducerComp(state, action);
+} = {
   type connectionstate =
     | Connecting
     | Connected
     | ConnectionLost;
-  type state = {conn: connectionstate};
+  type state = {
+    conn: connectionstate,
+    st: GameStateMachine.gamestate,
+  };
   type action =
-    | SetConnectionState(connectionstate);
+    | SetConnectionState(connectionstate)
+    | SetGameState(GameStateMachine.gamestate);
   let component = reducerComponent("Game");
   let makeUrl =
     Js.Global.(
       fun
-      | NewGame(nick) =>
+      | GameStateMachine.NewGame(nick) =>
         "ws://127.0.0.1:8080/new-room?nickname=" ++ encodeURIComponent(nick)
-      | JoinGame(nick, rid) =>
+      | GameStateMachine.JoinGame(nick, rid) =>
         "ws://127.0.0.1:8080/join-room?nickname="
         ++ encodeURIComponent(nick)
         ++ "&room_id="
         ++ string_of_int(rid)
     );
-  let make = (~gametype: gametype, _) => {
+  let make = (~gametype: GameStateMachine.gametype, _) => {
     ...component,
-    initialState: (_) => {conn: Connecting},
+    initialState: (_) => {
+      conn: Connecting,
+      st: GameStateMachine.create(gametype),
+    },
     reducer: (action, state) =>
       switch (action) {
       | SetConnectionState(conn) => Update({...state, conn})
+      | SetGameState(st) => Update({...state, st})
       },
     didMount: self => {
       let ws = WebSocket.make(makeUrl(gametype));
-      let handleMessage = evt => Js.log(evt);
+      let handleMessage = evt =>
+        switch (
+          MessageEvent.data(evt)
+          |> Json.parseOrRaise
+          |> GameStateMachine.transition(self.state.st)
+        ) {
+        | Some(st') => self.send(SetGameState(st'))
+        | None => self.send(SetGameState(Invalid))
+        };
       let handleOpen = (_) => self.send(SetConnectionState(Connected));
       ws
       |> WebSocket.on @@
@@ -96,7 +139,7 @@ module Page: {
     | ChooseNewJoin
     | NewGame
     | JoinGame
-    | InGame(Game.gametype);
+    | InGame(GameStateMachine.gametype);
   type state = {
     stage,
     nick: string,
@@ -105,7 +148,7 @@ module Page: {
   type action =
     | DidSelectNewGame
     | DidSelectJoinGame
-    | DidStartGame(Game.gametype)
+    | DidStartGame(GameStateMachine.gametype)
     | DidUpdateNickname(string)
     | DidUpdateRoomId(string);
   let component = reducerComponent("Page");
@@ -161,7 +204,11 @@ module Page: {
               <button
                 onClick=(
                   (_) =>
-                    self.send(DidStartGame(Game.NewGame(self.state.nick)))
+                    self.send(
+                      DidStartGame(
+                        GameStateMachine.NewGame(self.state.nick),
+                      ),
+                    )
                 )
                 type_="button"
                 className="btn btn-primary btn-lg btn-block">
@@ -211,7 +258,7 @@ module Page: {
                   (_) =>
                     self.send(
                       DidStartGame(
-                        Game.JoinGame(
+                        GameStateMachine.JoinGame(
                           self.state.nick,
                           int_of_string(self.state.rid),
                         ),
