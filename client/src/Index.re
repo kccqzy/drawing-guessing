@@ -1,6 +1,6 @@
 open ReasonReact;
 
-module D = ReactDOMRe;
+open WebSockets;
 
 type statelessComp =
   componentSpec(
@@ -14,7 +14,78 @@ type statelessComp =
 type reducerComp('s, 'a) =
   componentSpec('s, 's, noRetainedProps, noRetainedProps, 'a);
 
-let targetVal = e => D.domElementToObj(ReactEventRe.Form.target(e))##value;
+let targetVal = e => ReactDOMRe.domElementToObj(ReactEventRe.Form.target(e))##value;
+
+module Game: {
+  type gametype =
+    | NewGame(string)
+    | JoinGame(string, int);
+  type state;
+  type action;
+  let make: (~gametype: gametype, 'a) => reducerComp(state, action);
+} = {
+  type gametype =
+    | NewGame(string)
+    | JoinGame(string, int);
+  type connectionstate =
+    | Connecting
+    | Connected
+    | ConnectionLost;
+  type state = {conn: connectionstate};
+  type action =
+    | SetConnectionState(connectionstate);
+  let component = reducerComponent("Game");
+  let makeUrl =
+    Js.Global.(
+      fun
+      | NewGame(nick) =>
+        "ws://127.0.0.1:8080/new-room?nickname=" ++ encodeURIComponent(nick)
+      | JoinGame(nick, rid) =>
+        "ws://127.0.0.1:8080/join-room?nickname="
+        ++ encodeURIComponent(nick)
+        ++ "&room_id="
+        ++ string_of_int(rid)
+    );
+  let make = (~gametype: gametype, _) => {
+    ...component,
+    initialState: (_) => {conn: Connecting},
+    reducer: (action, state) =>
+      switch (action) {
+      | SetConnectionState(conn) => Update({...state, conn})
+      },
+    didMount: self => {
+      let ws = WebSocket.make(makeUrl(gametype));
+      let handleMessage = evt => Js.log(evt);
+      let handleOpen = (_) => self.send(SetConnectionState(Connected));
+      ws
+      |> WebSocket.on @@
+      Open(handleOpen)
+      |> WebSocket.on @@
+      Message(handleMessage)
+      |> WebSocket.on @@
+      Close((_) => self.send(SetConnectionState(ConnectionLost)))
+      |> WebSocket.on @@
+      Error((_) => self.send(SetConnectionState(ConnectionLost)))
+      |> ignore;
+      ();
+    },
+    render: self =>
+      switch (self.state.conn) {
+      | Connecting =>
+        <div className="alert alert-primary" role="alert">
+          (string("Connecting to server..."))
+        </div>
+      | ConnectionLost =>
+        <div className="alert alert-danger" role="alert">
+          (string("Connection lost. Sorry."))
+        </div>
+      | Connected =>
+        <div className="alert alert-primary" role="alert">
+          (string("Waiting for other players to join"))
+        </div>
+      },
+  };
+};
 
 module Page: {
   type state;
@@ -25,7 +96,7 @@ module Page: {
     | ChooseNewJoin
     | NewGame
     | JoinGame
-    | InGame;
+    | InGame(Game.gametype);
   type state = {
     stage,
     nick: string,
@@ -34,7 +105,7 @@ module Page: {
   type action =
     | DidSelectNewGame
     | DidSelectJoinGame
-    | DidStartGame
+    | DidStartGame(Game.gametype)
     | DidUpdateNickname(string)
     | DidUpdateRoomId(string);
   let component = reducerComponent("Page");
@@ -45,7 +116,7 @@ module Page: {
       switch (action) {
       | DidSelectNewGame => Update({...state, stage: NewGame})
       | DidSelectJoinGame => Update({...state, stage: JoinGame})
-      | DidStartGame => Update({...state, stage: InGame})
+      | DidStartGame(gt) => Update({...state, stage: InGame(gt)})
       | DidUpdateNickname(nick) => Update({...state, nick})
       | DidUpdateRoomId(rid) => Update({...state, rid})
       },
@@ -88,7 +159,10 @@ module Page: {
                 />
               </div>
               <button
-                onClick=((_) => self.send(DidStartGame))
+                onClick=(
+                  (_) =>
+                    self.send(DidStartGame(Game.NewGame(self.state.nick)))
+                )
                 type_="button"
                 className="btn btn-primary btn-lg btn-block">
                 (string("New Game"))
@@ -133,13 +207,23 @@ module Page: {
                 />
               </div>
               <button
-                onClick=((_) => self.send(DidStartGame))
+                onClick=(
+                  (_) =>
+                    self.send(
+                      DidStartGame(
+                        Game.JoinGame(
+                          self.state.nick,
+                          int_of_string(self.state.rid),
+                        ),
+                      ),
+                    )
+                )
                 type_="button"
                 className="btn btn-primary btn-lg btn-block">
                 (string("Join Game"))
               </button>
             </div>
-          | InGame => <div />
+          | InGame(gametype) => <Game gametype />
           }
         )
       </div>;
@@ -147,6 +231,4 @@ module Page: {
   };
 };
 
-let () = {
-  D.renderToElementWithId(element(Page.make([||])), "main");
-};
+let () = ReactDOMRe.renderToElementWithId(element(Page.make([||])), "main");
