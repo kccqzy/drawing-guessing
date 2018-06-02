@@ -1,23 +1,6 @@
 open ReasonReact
 open WebSockets
 
-module D = struct
-  include ReactDOMRe
-
-  external e :
-    string -> props -> ReasonReact.reactElement array
-    -> ReasonReact.reactElement
-    = "createElement"
-    [@@bs.splice]
-  [@@bs.val]
-  [@@bs.module "react"]
-end
-
-let targetVal e =
-  (ReactDOMRe.domElementToObj (ReactEventRe.Form.target e)) ## value
-
-
-let div_ p children = createDomElement "div" ~props:(Obj.magic p) children
 
 (* A statement component. *)
 type statelessComp =
@@ -130,41 +113,41 @@ end = struct
         (fun self ->
           match self.state.conn with
           | WillConnect | Connecting _ ->
-              D.e "div"
+              D.div_
                 (D.props ~className:"alert alert-primary" ~role:"alert" ())
                 [|string "Connecting to server..."|]
           | ConnectionLost ->
-              D.e "div"
+              D.div_
                 (D.props ~className:"alert alert-danger" ~role:"alert" ())
                 [|string "Connection lost. Sorry."|]
           | Connected ws ->
             match self.state.st with
             | Invalid ->
-                D.e "div"
+                D.div_
                   (D.props ~className:"alert alert-danger" ~role:"alert" ())
                   [|string "Sorry, the server encountered an error."|]
             | WaitForRoomId ->
-                D.e "div"
+                D.div_
                   (D.props ~className:"alert alert-primary" ~role:"alert" ())
                   [|string "Waiting for the server to tell us the Game PIN."|]
             | WaitForGameStart room ->
-                D.e "div" (D.props ())
-                  [| D.e "div"
+                D.div_ (D.props ())
+                  [| D.div_
                        (D.props ~className:"alert alert-primary" ~role:"alert"
                           ())
                        [| string
                             ( "Invite your friends to join the game! Use this Game PIN: "
                             ^ string_of_int room.rid ) |]
-                  ; D.e "div"
+                  ; D.div_
                       (D.props ~className:"row" ())
-                      [| D.e "p" (D.props ()) [|string "Current players:"|]
+                      [| D.p_ (D.props ()) [|string "Current players:"|]
                       ; createDomElement "ul" ~props:(Js.Obj.empty ())
                           (Array.map
-                             (fun p -> D.e "li" (D.props ()) [|string p|])
+                             (fun p -> D.li_ (D.props ()) [|string p|])
                              room.participants) |]
                   ; match gametype with
                     | GameStateMachine.NewGame _ ->
-                        D.e "button"
+                        D.button_
                           (D.props ~type_:"button"
                              ~className:"btn btn-primary btn-lg btn-block"
                              ~onClick:(fun _ -> WebSocket.sendString "abcd" ws)
@@ -211,42 +194,42 @@ end = struct
     ; render=
         (fun self ->
           let atoi s = try Some (int_of_string s) with Failure _ -> None in
-          D.e "div"
+          D.div_
             (D.props ~id:"Page" ~className:"container-fluid" ())
             [| match self.state.stage with
                | ChooseNewJoin ->
-                   D.e "div" (D.props ())
-                     [| D.e "h1" (D.props ()) [|string "Drawing and Guessing"|]
-                     ; D.e "button"
+                   D.div_ (D.props ())
+                     [| D.h1_ (D.props ()) [|string "Drawing and Guessing"|]
+                     ; D.button_
                          (D.props ~type_:"button"
                             ~className:"btn btn-primary btn-lg btn-block"
                             ~onClick:(fun _ -> self.send DidSelectNewGame)
                             ())
                          [|string "New Game"|]
-                     ; D.e "button"
+                     ; D.button_
                          (D.props ~type_:"button"
                             ~className:"btn btn-primary btn-lg btn-block"
                             ~onClick:(fun _ -> self.send DidSelectJoinGame)
                             ())
                          [|string "Join Game"|] |]
                | NewGame ->
-                   D.e "div" (D.props ())
-                     [| D.e "h1" (D.props ()) [|string "Create A New Game"|]
-                     ; D.e "div"
+                   D.div_ (D.props ())
+                     [| D.h1_ (D.props ()) [|string "Create A New Game"|]
+                     ; D.div_
                          (D.props ~className:"form-group" ())
-                         [| D.e "label"
+                         [| D.label_
                               (D.props ~htmlFor:"nickname" ())
                               [|string "Nickname"|]
-                         ; D.e "input"
+                         ; D.input_
                              (D.props ~type_:"text" ~className:"form-control"
                                 ~id:"nickname" ~placeholder:"Your Nickname"
                                 ~value:self.state.nick
                                 ~onChange:(fun e ->
-                                  self.send (DidUpdateNickname (targetVal e))
+                                  self.send (DidUpdateNickname (D.targetVal e))
                                   )
                                 ())
                              [||] |]
-                     ; D.e "button"
+                     ; D.button_
                          (D.props
                             ~onClick:(fun _ ->
                               self.send
@@ -257,33 +240,33 @@ end = struct
                             ~className:"btn btn-primary btn-lg btn-block" ())
                          [|string "New Game"|] |]
                | JoinGame ->
-                   D.e "div" (D.props ())
-                     [| D.e "h1" (D.props ()) [|string "Join A Game"|]
-                     ; D.e "div"
+                   D.div_ (D.props ())
+                     [| D.h1_ (D.props ()) [|string "Join A Game"|]
+                     ; D.div_
                          (D.props ~className:"form-group" ())
-                         [| D.e "label"
+                         [| D.label_
                               (D.props ~htmlFor:"nickname" ())
                               [|string "Nickname"|]
-                         ; D.e "input"
+                         ; D.input_
                              (D.props ~type_:"text" ~className:"form-control"
                                 ~id:"nickname" ~placeholder:"Your Nickname"
                                 ~value:self.state.nick
                                 ~onChange:(fun e ->
-                                  self.send (DidUpdateNickname (targetVal e))
+                                  self.send (DidUpdateNickname (D.targetVal e))
                                   )
                                 ())
                              [||] |]
-                     ; D.e "div"
+                     ; D.div_
                          (D.props ~className:"form-group" ())
-                         [| D.e "label"
+                         [| D.label_
                               (D.props ~htmlFor:"rid" ())
                               [|string "Game PIN"|]
-                         ; D.e "input"
+                         ; D.input_
                              (D.props ~type_:"number" ~className:"form-control"
                                 ~id:"rid" ~placeholder:"Game PIN"
                                 ~value:self.state.rid
                                 ~onChange:(fun e ->
-                                  let value = targetVal e in
+                                  let value = D.targetVal e in
                                   if value = "" then
                                     self.send (DidUpdateRoomId value)
                                   else
@@ -293,7 +276,7 @@ end = struct
                                     | _ -> () )
                                 ())
                              [||] |]
-                     ; D.e "button"
+                     ; D.button_
                          (D.props
                             ~onClick:(fun _ ->
                               self.send
