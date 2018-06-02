@@ -10,9 +10,9 @@ import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
-import qualified Data.IntMap as IM
+import Data.Foldable
+import qualified Data.IntMap.Strict as IM
 import qualified Data.List as List
-import qualified Data.Sequence as Seq
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8)
 import qualified Data.Vector as V
@@ -90,8 +90,10 @@ data Client = Client
   , cConn :: Connection
   }
 
+type Clients = IM.IntMap Client
+
 data Room = Room
-  { rClients :: Seq.Seq Client
+  { rClients :: Clients
   , rJoinable :: Bool
   }
 
@@ -109,20 +111,20 @@ beginConnection cont st rid nick pending = do
   forkPingThread conn 30
   cont conn st rid nick
 
-announceNewPlayers :: TVar ServerState -> Int -> Seq.Seq Client -> Connection -> IO ()
+announceNewPlayers :: TVar ServerState -> Int -> Clients -> Connection -> IO ()
 announceNewPlayers st rid initialClients conn = do
     let findNewPlayers previousClients = do
-          sendTextData conn (AnnouncePlayers (cNickname <$> previousClients))
+          sendTextData conn (AnnouncePlayers (toList (cNickname <$> previousClients)))
           newClients <- atomically $ do
             currentClients <- (rClients . (IM.! rid)) <$> readTVar st
-            if Seq.length currentClients == Seq.length previousClients then retry else pure currentClients
+            if IM.size currentClients == IM.size previousClients then retry else pure currentClients
           findNewPlayers newClients
     findNewPlayers initialClients
 
 newRoom :: TVar ServerState -> Int -> T.Text -> ServerApp
 newRoom =
   beginConnection $ \conn st rid nick -> do
-    let clients = Seq.singleton Client {cNickname = nick, cConn = conn}
+    let clients = IM.singleton 0 Client {cNickname = nick, cConn = conn}
     atomically $ modifyTVar' st (IM.insert rid Room {rJoinable = True, rClients = clients})
     sendTextData conn (TellRoomId rid)
     playerListAnnouncer <- async $ announceNewPlayers st rid clients conn
@@ -131,12 +133,16 @@ newRoom =
       ToldStartGame rounds ->
         join $
         atomically $ do
-          clientsCount <- (Seq.length . rClients . (IM.! rid)) <$> readTVar st
+          clientsCount <- (IM.size . rClients . (IM.! rid)) <$> readTVar st
           if clientsCount >= 2
             then modifyTVar' st (IM.adjust (\Room {..} -> Room {rJoinable = False, ..}) rid) >>
                  pure (cancel playerListAnnouncer >> beginGame st rid rounds)
             else retry
       _ -> throwIO (ErrorCall "Malicious client: State violation.")
+
+(|>) :: IM.IntMap a -> a -> IM.IntMap a
+m |> v | not (IM.null m), (mi, _) <- IM.findMax m = IM.insert (1+mi) v m
+       | otherwise = IM.singleton 0 v
 
 joinRoom :: TVar ServerState -> Int -> T.Text -> ServerApp
 joinRoom =
@@ -149,11 +155,11 @@ joinRoom =
           Just room
             | rJoinable room -> do
               let newClient = Client {cNickname = nick, cConn = conn}
-                  newClients = rClients room Seq.|> newClient
+                  newClients = rClients room |> newClient
               writeTVar st (IM.insert rid room {rClients = newClients} rooms)
               pure (pure newClients)
-          _ -> pure $ sendClose conn ("Room does not exist." :: T.Text) >> pure Seq.empty
-    unless (Seq.null initialClients) $ do
+          _ -> pure $ sendClose conn ("Room does not exist." :: T.Text) >> pure IM.empty
+    unless (IM.null initialClients) $ do
       race_ (announceNewPlayers st rid initialClients conn) $
         atomically $ do
           joinable <- (rJoinable . (IM.! rid)) <$> readTVar st
@@ -185,8 +191,13 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
   let broadcastTo who msg = forM_ who $ \(_, _, _, conn) ->  sendTextData conn msg
       broadcast = broadcastTo clients'
 
-  result <- flip Seq.traverseWithIndex (Seq.cycleTaking rounds clients') $ \roundNo (drawerName, drawerQueue, _, drawerConn) -> do
-    let guessers = Seq.deleteAt roundNo clients'
+  let clientsV = V.fromList (IM.toList clients')
+  shuffledClients <-
+        let (q, r) = rounds `quotRem` V.length clientsV in
+          uniformShuffle (V.concat (V.take r clientsV : List.replicate q clientsV)) rng
+
+  result <- flip V.imapM shuffledClients $ \roundNo (drawerIndex, (drawerName, drawerQueue, _, drawerConn)) -> do
+    let guessers = IM.delete drawerIndex clients'
         broadcastGuessers = broadcastTo guessers
 
     broadcast (AnnounceRound roundNo drawerName)
@@ -229,7 +240,8 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
                                        | otherwise -> sendTextData conn (ReplyGuessIncorrect w)
               _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
-          actions = drawerThread drawerConn Seq.<| fmap (\(name, readQueue, _, conn) -> guesserThread name readQueue conn) guessers
+          actions =
+            drawerThread drawerConn : map (\(name, readQueue, _, conn) -> guesserThread name readQueue conn) (IM.elems guessers)
 
       mapConcurrently_ id actions
       atomically (readTMVar winner)
@@ -241,7 +253,7 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
       Left _ -> pure Nothing
       Right w -> pure (Just w)
   atomically $ modifyTVar' st (IM.delete rid)
-  broadcast (EndGameWithTally result)
+  broadcast (EndGameWithTally (toList result))
   forConcurrently_ clients' $ \(_, _, receiver, conn) -> do
     sendClose conn ("Goodbye!" :: T.Text)
     threadDelay 2000000
