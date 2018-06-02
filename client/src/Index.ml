@@ -14,22 +14,42 @@ type statelessComp =
 type ('s, 'a) reducerComp =
   ('s, 's, noRetainedProps, noRetainedProps, 'a) componentSpec
 
-module GameStateMachine : sig
-  type gametype = NewGame of string | JoinGame of string * int
+(* Game logic follows. *)
 
-  type room = {rid: int; participants: string array}
+type gametype = NewGame of string | JoinGame of string * int
 
-  type gamestate = Invalid | WaitForRoomId | WaitForGameStart of room
+type room = {rid: int; participants: string array}
 
-  val create : gametype -> gamestate
+type role = Drawer | Guesser
 
-  val transition : gamestate -> Js.Json.t -> gamestate
+type round = {index: int; drawer: string; role: role}
+
+type gamestate =
+  | Invalid
+  | WaitForRoomId
+  | WaitForGameStart of room
+  | WaitForRoundStart of room * round
+
+module Game : sig
+  type state
+
+  type action
+
+  val make : gametype:gametype -> 'a -> (state, action) reducerComp
 end = struct
-  type gametype = NewGame of string | JoinGame of string * int
+  type connectionstate =
+    | WillConnect
+    | Connecting of WebSocket.t
+    | Connected of WebSocket.t
+    | ConnectionLost
 
-  type room = {rid: int; participants: string array}
+  type state = {conn: connectionstate; st: gamestate}
 
-  type gamestate = Invalid | WaitForRoomId | WaitForGameStart of room
+  type action =
+    | SetConnectionState of connectionstate
+    | TransitionGameState of Js.Json.t
+
+  let component = reducerComponent "Game"
 
   let create = function
     | NewGame _ -> WaitForRoomId
@@ -46,52 +66,37 @@ end = struct
         WaitForGameStart
           { room with
             participants= js |> JD.field "contents" (JD.array JD.string) }
+    | "AnnounceRound", WaitForGameStart room ->
+        WaitForRoundStart
+          ( room
+          , let index, drawer =
+              js |> JD.(field "contents" (tuple2 JD.int JD.string))
+            in
+            {index; drawer; role= Guesser} )
+    | "TellMayStartRound", WaitForRoundStart (room, round) ->
+        WaitForRoundStart (room, {round with role= Drawer})
     | _ -> Invalid
-end
 
-module Game : sig
-  type state
-
-  type action
-
-  val make :
-    gametype:GameStateMachine.gametype -> 'a -> (state, action) reducerComp
-end = struct
-  type connectionstate =
-    | WillConnect
-    | Connecting of WebSocket.t
-    | Connected of WebSocket.t
-    | ConnectionLost
-
-  type state = {conn: connectionstate; st: GameStateMachine.gamestate}
-
-  type action =
-    | SetConnectionState of connectionstate
-    | TransitionGameState of Js.Json.t
-
-  let component = reducerComponent "Game"
 
   let makeUrl =
     let open Js.Global in
     function
-      | GameStateMachine.NewGame nick ->
+      | NewGame nick ->
           "ws://127.0.0.1:8080/new-room?nickname=" ^ encodeURIComponent nick
-      | GameStateMachine.JoinGame (nick, rid) ->
+      | JoinGame (nick, rid) ->
           "ws://127.0.0.1:8080/join-room?nickname=" ^ encodeURIComponent nick
           ^ "&room_id=" ^ string_of_int rid
 
 
-  let make ~(gametype: GameStateMachine.gametype) _ =
+  let make ~(gametype: gametype) _ =
     { component with
-      initialState=
-        (fun _ -> {conn= WillConnect; st= GameStateMachine.create gametype})
+      initialState= (fun _ -> {conn= WillConnect; st= create gametype})
     ; reducer=
         (fun action state ->
           match action with
           | SetConnectionState conn -> Update {state with conn}
           | TransitionGameState json ->
-              Update {state with st= GameStateMachine.transition state.st json}
-          )
+              Update {state with st= transition state.st json} )
     ; didMount=
         (fun self ->
           let ws = WebSocket.make (makeUrl gametype) in
@@ -137,15 +142,14 @@ end = struct
                        [| string
                             ( "Invite your friends to join the game! Use this Game PIN: "
                             ^ string_of_int room.rid ) |]
-                  ; D.div_
-                      (D.props ~className:"row" ())
+                  ; D.div_ (D.props ())
                       [| D.p_ (D.props ()) [|string "Current players:"|]
                       ; createDomElement "ul" ~props:(Js.Obj.empty ())
                           (Array.map
                              (fun p -> D.li_ (D.props ()) [|string p|])
                              room.participants) |]
                   ; match gametype with
-                    | GameStateMachine.NewGame _ ->
+                    | NewGame _ ->
                         D.button_
                           (D.props ~type_:"button"
                              ~className:"btn btn-primary btn-lg btn-block"
@@ -163,7 +167,32 @@ end = struct
                                WebSocket.sendString msg ws )
                              ())
                           [|string "Start Game Now"|]
-                    | GameStateMachine.JoinGame (_, _) -> null |] ) }
+                    | JoinGame (_, _) -> null |]
+            | WaitForRoundStart (_, round) ->
+                D.div_ (D.props ())
+                  [| D.div_
+                       (D.props ~className:"alert alert-primary" ~role:"alert"
+                          ())
+                       [| string
+                            ( "Round " ^ string_of_int (round.index + 1)
+                            ^ " is about to start! This round, " ^ round.drawer
+                            ^ " will draw and everyone else will guess." ) |]
+                  ; match round.role with
+                    | Guesser -> null
+                    | Drawer ->
+                        D.button_
+                          (D.props ~type_:"button"
+                             ~className:"btn btn-primary btn-lg btn-block"
+                             ~onClick:(fun _ ->
+                               let dict = Js.Dict.empty () in
+                               Js.Dict.set dict "tag"
+                                 (Js.Json.string "ToldStartRound") ;
+                               let msg =
+                                 Js.Json.stringify (Js.Json.object_ dict)
+                               in
+                               WebSocket.sendString msg ws )
+                             ())
+                          [|string "Ready To Draw!"|] |] ) }
 end
 
 module Page : sig
@@ -173,18 +202,14 @@ module Page : sig
 
   val make : 'a -> (state, action) reducerComp
 end = struct
-  type stage =
-    | ChooseNewJoin
-    | NewGame
-    | JoinGame
-    | InGame of GameStateMachine.gametype
+  type stage = ChooseNewJoin | NewGame | JoinGame | InGame of gametype
 
   type state = {stage: stage; nick: string; rid: string}
 
   type action =
     | DidSelectNewGame
     | DidSelectJoinGame
-    | DidStartGame of GameStateMachine.gametype
+    | DidStartGame of gametype
     | DidUpdateNickname of string
     | DidUpdateRoomId of string
 
@@ -243,9 +268,7 @@ end = struct
                          (D.props
                             ~onClick:(fun _ ->
                               self.send
-                                (DidStartGame
-                                   (GameStateMachine.NewGame self.state.nick))
-                              )
+                                (DidStartGame (NewGame self.state.nick)) )
                             ~type_:"button"
                             ~className:"btn btn-primary btn-lg btn-block" ())
                          [|string "New Game"|] |]
@@ -291,7 +314,7 @@ end = struct
                             ~onClick:(fun _ ->
                               self.send
                                 (DidStartGame
-                                   (GameStateMachine.JoinGame
+                                   (JoinGame
                                       ( self.state.nick
                                       , int_of_string self.state.rid ))) )
                             ~type_:"button"
