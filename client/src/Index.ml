@@ -11,9 +11,13 @@ module D = struct
     [@@bs.splice]
   [@@bs.val]
   [@@bs.module "react"]
-
-  let targetVal e = (domElementToObj (ReactEventRe.Form.target e)) ## value
 end
+
+let targetVal e =
+  (ReactDOMRe.domElementToObj (ReactEventRe.Form.target e)) ## value
+
+
+let div_ p children = createDomElement "div" ~props:(Obj.magic p) children
 
 (* A statement component. *)
 type statelessComp =
@@ -31,27 +35,36 @@ type ('s, 'a) reducerComp =
 module GameStateMachine : sig
   type gametype = NewGame of string | JoinGame of string * int
 
-  type gamestate = Invalid | WaitForRoomId | WaitForGameStart of int
+  type room = {rid: int; participants: string array}
+
+  type gamestate = Invalid | WaitForRoomId | WaitForGameStart of room
 
   val create : gametype -> gamestate
 
-  val transition : gamestate -> Js.Json.t -> gamestate option
+  val transition : gamestate -> Js.Json.t -> gamestate
 end = struct
   type gametype = NewGame of string | JoinGame of string * int
 
-  type gamestate = Invalid | WaitForRoomId | WaitForGameStart of int
+  type room = {rid: int; participants: string array}
+
+  type gamestate = Invalid | WaitForRoomId | WaitForGameStart of room
 
   let create = function
     | NewGame _ -> WaitForRoomId
-    | JoinGame (_, rid) -> WaitForGameStart rid
+    | JoinGame (_, rid) -> WaitForGameStart {rid; participants= [||]}
 
 
   let transition st js =
     let module JD = Json.Decode in
     match ((js |> JD.(field "tag" JD.string)), st) with
     | "TellRoomId", WaitForRoomId ->
-        Some (WaitForGameStart (js |> JD.(field "contents" int)))
-    | _ -> None
+        WaitForGameStart
+          {rid= (js |> JD.(field "contents" int)); participants= [||]}
+    | "AnnouncePlayers", WaitForGameStart room ->
+        WaitForGameStart
+          { room with
+            participants= js |> JD.field "contents" (JD.array JD.string) }
+    | _ -> Invalid
 end
 
 module Game : sig
@@ -62,13 +75,17 @@ module Game : sig
   val make :
     gametype:GameStateMachine.gametype -> 'a -> (state, action) reducerComp
 end = struct
-  type connectionstate = Connecting | Connected | ConnectionLost
+  type connectionstate =
+    | WillConnect
+    | Connecting of WebSocket.t
+    | Connected of WebSocket.t
+    | ConnectionLost
 
   type state = {conn: connectionstate; st: GameStateMachine.gamestate}
 
   type action =
     | SetConnectionState of connectionstate
-    | SetGameState of GameStateMachine.gamestate
+    | TransitionGameState of Js.Json.t
 
   let component = reducerComponent "Game"
 
@@ -85,24 +102,22 @@ end = struct
   let make ~(gametype: GameStateMachine.gametype) _ =
     { component with
       initialState=
-        (fun _ -> {conn= Connecting; st= GameStateMachine.create gametype})
+        (fun _ -> {conn= WillConnect; st= GameStateMachine.create gametype})
     ; reducer=
         (fun action state ->
           match action with
           | SetConnectionState conn -> Update {state with conn}
-          | SetGameState st -> Update {state with st} )
+          | TransitionGameState json ->
+              Update {state with st= GameStateMachine.transition state.st json}
+          )
     ; didMount=
         (fun self ->
           let ws = WebSocket.make (makeUrl gametype) in
           let handleMessage evt =
-            match
-              MessageEvent.data evt |> Json.parseOrRaise
-              |> GameStateMachine.transition self.state.st
-            with
-            | Some st' -> self.send (SetGameState st')
-            | None -> self.send (SetGameState Invalid)
+            self.send
+              (TransitionGameState (MessageEvent.data evt |> Json.parseOrRaise))
           in
-          let handleOpen _ = self.send (SetConnectionState Connected) in
+          let handleOpen _ = self.send (SetConnectionState (Connected ws)) in
           ws |> WebSocket.on @@ Open handleOpen
           |> WebSocket.on @@ Message handleMessage
           |> WebSocket.on
@@ -110,11 +125,11 @@ end = struct
           |> WebSocket.on
              @@ Error (fun _ -> self.send (SetConnectionState ConnectionLost))
           |> ignore ;
-          () )
+          self.send (SetConnectionState (Connecting ws)) )
     ; render=
         (fun self ->
           match self.state.conn with
-          | Connecting ->
+          | WillConnect | Connecting _ ->
               D.e "div"
                 (D.props ~className:"alert alert-primary" ~role:"alert" ())
                 [|string "Connecting to server..."|]
@@ -122,10 +137,40 @@ end = struct
               D.e "div"
                 (D.props ~className:"alert alert-danger" ~role:"alert" ())
                 [|string "Connection lost. Sorry."|]
-          | Connected ->
-              D.e "div"
-                (D.props ~className:"alert alert-primary" ~role:"alert" ())
-                [|string "Waiting for other players to join"|] ) }
+          | Connected ws ->
+            match self.state.st with
+            | Invalid ->
+                D.e "div"
+                  (D.props ~className:"alert alert-danger" ~role:"alert" ())
+                  [|string "Sorry, the server encountered an error."|]
+            | WaitForRoomId ->
+                D.e "div"
+                  (D.props ~className:"alert alert-primary" ~role:"alert" ())
+                  [|string "Waiting for the server to tell us the Game PIN."|]
+            | WaitForGameStart room ->
+                D.e "div" (D.props ())
+                  [| D.e "div"
+                       (D.props ~className:"alert alert-primary" ~role:"alert"
+                          ())
+                       [| string
+                            ( "Invite your friends to join the game! Use this Game PIN: "
+                            ^ string_of_int room.rid ) |]
+                  ; D.e "div"
+                      (D.props ~className:"row" ())
+                      [| D.e "p" (D.props ()) [|string "Current players:"|]
+                      ; createDomElement "ul" ~props:(Js.Obj.empty ())
+                          (Array.map
+                             (fun p -> D.e "li" (D.props ()) [|string p|])
+                             room.participants) |]
+                  ; match gametype with
+                    | GameStateMachine.NewGame _ ->
+                        D.e "button"
+                          (D.props ~type_:"button"
+                             ~className:"btn btn-primary btn-lg btn-block"
+                             ~onClick:(fun _ -> WebSocket.sendString "abcd" ws)
+                             ())
+                          [|string "Start Game Now"|]
+                    | GameStateMachine.JoinGame (_, _) -> null |] ) }
 end
 
 module Page : sig
@@ -197,7 +242,7 @@ end = struct
                                 ~id:"nickname" ~placeholder:"Your Nickname"
                                 ~value:self.state.nick
                                 ~onChange:(fun e ->
-                                  self.send (DidUpdateNickname (D.targetVal e))
+                                  self.send (DidUpdateNickname (targetVal e))
                                   )
                                 ())
                              [||] |]
@@ -224,7 +269,7 @@ end = struct
                                 ~id:"nickname" ~placeholder:"Your Nickname"
                                 ~value:self.state.nick
                                 ~onChange:(fun e ->
-                                  self.send (DidUpdateNickname (D.targetVal e))
+                                  self.send (DidUpdateNickname (targetVal e))
                                   )
                                 ())
                              [||] |]
@@ -238,7 +283,7 @@ end = struct
                                 ~id:"rid" ~placeholder:"Game PIN"
                                 ~value:self.state.rid
                                 ~onChange:(fun e ->
-                                  let value = D.targetVal e in
+                                  let value = targetVal e in
                                   if value = "" then
                                     self.send (DidUpdateRoomId value)
                                   else
