@@ -128,10 +128,14 @@ newRoom =
     playerListAnnouncer <- async $ announceNewPlayers st rid clients conn
     d <- receiveData conn
     case d of
-      ToldStartGame rounds -> do
-        cancel playerListAnnouncer
-        atomically $ modifyTVar' st (IM.adjust (\Room {..} -> Room {rJoinable = False, ..}) rid)
-        beginGame st rid rounds
+      ToldStartGame rounds ->
+        join $
+        atomically $ do
+          clientsCount <- (Seq.length . rClients . (IM.! rid)) <$> readTVar st
+          if clientsCount >= 2
+            then modifyTVar' st (IM.adjust (\Room {..} -> Room {rJoinable = False, ..}) rid) >>
+                 pure (cancel playerListAnnouncer >> beginGame st rid rounds)
+            else retry
       _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
 joinRoom :: TVar ServerState -> Int -> T.Text -> ServerApp
