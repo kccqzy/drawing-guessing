@@ -213,7 +213,7 @@ end = struct
                              (fun p -> D.li_ (D.props ()) [|string p|])
                              room.participants) |]
                   ; match gametype with
-                    | NewGame _ ->
+                    | NewGame _ when Array.length room.participants >= 2 ->
                         D.button_
                           (D.props ~type_:"button"
                              ~className:"btn btn-primary btn-lg btn-block"
@@ -231,7 +231,7 @@ end = struct
                                WebSocket.sendString msg ws )
                              ())
                           [|string "Start Game Now"|]
-                    | JoinGame (_, _) -> null |]
+                    | _ -> null |]
             | WaitForRoundStart (_, round) ->
                 D.div_ (D.props ())
                   [| D.h2_ (D.props ())
