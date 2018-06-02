@@ -186,6 +186,7 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
         broadcastGuessers = broadcastTo guessers
 
     broadcast (AnnounceRound roundNo drawerName)
+    sendTextData drawerConn TellMayStartRound
     let wd = wordlist V.! (roundNo `mod` V.length wordlist)
     ss <- atomically (readTQueue drawerQueue)
     case ss of
@@ -221,7 +222,7 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
               Right _ -> pure ()
               Left (Right t) -> sendTextData conn (RelayDrawingCmd t) >> guesserThread name readQueue conn
               Left (Left (GotGuess w)) | w == wd -> atomically (putTMVar winner name)
-                                       | otherwise -> sendTextData conn ReplyGuessIncorrect
+                                       | otherwise -> sendTextData conn (ReplyGuessIncorrect w)
               _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
           actions = drawerThread drawerConn Seq.<| fmap (\(name, readQueue, _, conn) -> guesserThread name readQueue conn) guessers

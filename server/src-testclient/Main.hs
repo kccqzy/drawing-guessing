@@ -14,10 +14,14 @@ import Types
 
 clientApp :: ClientApp ()
 clientApp conn =
-  withAsync (forever $ do
-                l <- getLine
-                let msg = read l :: Msg
-                sendTextData conn msg) $ \_ -> forever $ do
+  race_
+    (forever $ do
+       l <- getLine
+       let msg = readMaybe l :: Maybe Msg
+       case msg of
+         Just m -> sendTextData conn m
+         Nothing -> hPutStrLn stderr "Invalid command.") $
+  forever $ do
     (msg :: Msg) <- receiveData conn
     print msg
 
