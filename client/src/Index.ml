@@ -24,11 +24,49 @@ type role = Drawer | Guesser
 
 type round = {index: int; drawer: string; role: role}
 
+type inround =
+  {wordlength: int; word: string; secondsleft: int; currentGuess: string}
+
 type gamestate =
   | Invalid
   | WaitForRoomId
   | WaitForGameStart of room
   | WaitForRoundStart of room * round
+  | InRound of room * round * inround
+
+module Canvas : sig
+  type state
+
+  type action
+
+  val make : editable:bool -> 'a -> (state, action) reducerComp
+end = struct
+  type state = {canvasRef: Dom.element option ref}
+
+  type action = unit
+
+  let component = reducerComponent "Canvas"
+
+  let make ~(editable: bool) _ =
+    { component with
+      initialState= (fun _ -> {canvasRef= ref None})
+    ; reducer= (fun () _ -> NoUpdate)
+    ; render=
+        (fun self ->
+          D.canvas_
+            (D.props
+               ~ref:
+                 (self.handle (fun theRef {state} ->
+                      state.canvasRef := Js.Nullable.toOption theRef ;
+                      Js.log "Gotten DOM ref from react for canvas:" ;
+                      Js.log theRef ))
+               ~style:
+                 (D.Style.make ~width:"calc(100vw - 30px)"
+                    ~height:"calc(100vw - 30px)" ~backgroundColor:"#e6f1fe"
+                    ~borderRadius:"4px" ())
+               ())
+            [||] ) }
+end
 
 module Game : sig
   type state
@@ -75,6 +113,31 @@ end = struct
             {index; drawer; role= Guesser} )
     | "TellMayStartRound", WaitForRoundStart (room, round) ->
         WaitForRoundStart (room, {round with role= Drawer})
+    | "TellDrawerWord", WaitForRoundStart (room, round)
+      when round.role = Drawer ->
+        InRound
+          ( room
+          , round
+          , let word = js |> JD.field "contents" JD.string in
+            { word
+            ; wordlength= String.length word
+            ; secondsleft= 90
+            ; currentGuess= "" } )
+    | "AnnounceWordLength", WaitForRoundStart (room, round)
+      when round.role = Guesser ->
+        InRound
+          ( room
+          , round
+          , let wordlength = js |> JD.field "contents" JD.int in
+            { word= String.make wordlength '_'
+            ; wordlength
+            ; secondsleft= 90
+            ; currentGuess= "" } )
+    | "AnnounceTimeLeft", InRound (room, round, inround) ->
+        InRound
+          ( room
+          , round
+          , {inround with secondsleft= js |> JD.field "contents" JD.int} )
     | _ -> Invalid
 
 
@@ -136,15 +199,16 @@ end = struct
                   [|string "Waiting for the server to tell us the Game PIN."|]
             | WaitForGameStart room ->
                 D.div_ (D.props ())
-                  [| D.div_
-                       (D.props ~className:"alert alert-primary" ~role:"alert"
-                          ())
-                       [| string
-                            ( "Invite your friends to join the game! Use this Game PIN: "
-                            ^ string_of_int room.rid ) |]
+                  [| D.h2_ (D.props ()) [|string {j|Get Ready…|j}|]
+                  ; D.div_
+                      (D.props ~className:"alert alert-primary" ~role:"alert"
+                         ())
+                      [| string
+                           ( "Invite your friends to join the game! Use this Game PIN: "
+                           ^ string_of_int room.rid ) |]
                   ; D.div_ (D.props ())
                       [| D.p_ (D.props ()) [|string "Current players:"|]
-                      ; createDomElement "ul" ~props:(Js.Obj.empty ())
+                      ; D.ul_ (D.props ())
                           (Array.map
                              (fun p -> D.li_ (D.props ()) [|string p|])
                              room.participants) |]
@@ -170,13 +234,15 @@ end = struct
                     | JoinGame (_, _) -> null |]
             | WaitForRoundStart (_, round) ->
                 D.div_ (D.props ())
-                  [| D.div_
-                       (D.props ~className:"alert alert-primary" ~role:"alert"
-                          ())
-                       [| string
-                            ( "Round " ^ string_of_int (round.index + 1)
-                            ^ " is about to start! This round, " ^ round.drawer
-                            ^ " will draw and everyone else will guess." ) |]
+                  [| D.h2_ (D.props ())
+                       [|string ("Round " ^ string_of_int (round.index + 1))|]
+                  ; D.div_
+                      (D.props ~className:"alert alert-primary" ~role:"alert"
+                         ())
+                      [| string
+                           ( "Round " ^ string_of_int (round.index + 1)
+                           ^ " is about to start! This round, " ^ round.drawer
+                           ^ " will draw and everyone else will guess." ) |]
                   ; match round.role with
                     | Guesser -> null
                     | Drawer ->
@@ -192,7 +258,54 @@ end = struct
                                in
                                WebSocket.sendString msg ws )
                              ())
-                          [|string "Ready To Draw!"|] |] ) }
+                          [|string "Ready To Draw!"|] |]
+            | InRound (_, round, inround) ->
+                D.div_ (D.props ())
+                  [| D.h2_ (D.props ())
+                       [|string ("Round " ^ string_of_int (round.index + 1))|]
+                  ; D.div_
+                      (D.props
+                         ~className:
+                           ( if inround.secondsleft > 15 then
+                               "alert alert-primary"
+                           else "alert alert-danger" )
+                         ~role:"alert" ())
+                      [| string "Time left in this round: "
+                      ; D.strong_ (D.props ())
+                          [|string (string_of_int inround.secondsleft)|] |]
+                  ; D.pre_
+                      (D.props
+                         ~style:
+                           (D.Style.make ~textTransform:"uppercase"
+                              ~fontWeight:"bold" ~fontSize:"1.5rem"
+                              ~textAlign:"center" ~letterSpacing:"0.3em" ())
+                         ())
+                      [|string inround.word|]
+                  ; D.div_ (D.props ())
+                      [| element
+                           (Canvas.make
+                              ~editable:
+                                ( match round.role with
+                                | Guesser -> false
+                                | Drawer -> true )
+                              [||]) |]
+                  ; match round.role with
+                    | Drawer -> null
+                    | Guesser ->
+                        D.div_
+                          (D.props ~className:"input-group" ())
+                          [| D.input_
+                               (D.props ~type_:"text" ~className:"form-control"
+                                  ~value:inround.currentGuess
+                                  ~placeholder:"Type a guess here" ())
+                               [||]
+                          ; D.div_
+                              (D.props ~className:"input-group-append" ())
+                              [| D.button_
+                                   (D.props
+                                      ~className:"btn btn-outline-secondary"
+                                      ~type_:"button" ())
+                                   [|string "Guess!"|] |] |] |] ) }
 end
 
 module Page : sig

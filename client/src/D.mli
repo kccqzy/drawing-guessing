@@ -9,12 +9,22 @@ val div_ : el
 
 val p_ : el
 
+val pre_ : el
+
+val ul_ : el
+
 val li_ : el
 
 val button_ : el
 
 val h1_ : el
 
+val h2_ : el
+
 val label_ : el
 
 val input_ : el
+
+val canvas_ : el
+
+val strong_ : el
