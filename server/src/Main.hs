@@ -197,9 +197,9 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
     broadcastGuessers (AnnounceWordLength (T.length wd))
 
     let timerThread =
-          forM_ (enumFromThenTo 8 7 0) $ \decaSeconds -> do
-            threadDelay 10000000
-            broadcast (AnnounceTimeLeft (decaSeconds * 10))
+          forM_ (enumFromThenTo 89 88 0) $ \seconds -> do
+            threadDelay 1000000
+            broadcast (AnnounceTimeLeft seconds)
 
     r <- race timerThread $ do
       -- Within the time limit of 90 seconds, we either try to receive a drawing
