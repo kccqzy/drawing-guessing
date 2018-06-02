@@ -109,35 +109,54 @@ beginConnection cont st rid nick pending = do
   forkPingThread conn 30
   cont conn st rid nick
 
+announceNewPlayers :: TVar ServerState -> Int -> Seq.Seq Client -> Connection -> IO ()
+announceNewPlayers st rid initialClients conn = do
+    let findNewPlayers previousClients = do
+          sendTextData conn (AnnouncePlayers (cNickname <$> previousClients))
+          newClients <- atomically $ do
+            currentClients <- (rClients . (IM.! rid)) <$> readTVar st
+            if Seq.length currentClients == Seq.length previousClients then retry else pure currentClients
+          findNewPlayers newClients
+    findNewPlayers initialClients
+
 newRoom :: TVar ServerState -> Int -> T.Text -> ServerApp
-newRoom = beginConnection $ \conn st rid nick -> do
-  atomically $
-    modifyTVar'
-    st
-    (IM.insert rid Room {rJoinable = True, rClients = Seq.singleton Client {cNickname = nick, cConn = conn}})
-  sendTextData conn (TellRoomId rid)
-  d <- receiveData conn
-  case d of
-    ToldStartGame rounds -> do
-      atomically $ modifyTVar' st (IM.adjust (\Room {..} -> Room {rJoinable = False, ..}) rid)
-      beginGame st rid rounds
-    _ -> throwIO (ErrorCall "Malicious client: State violation.")
+newRoom =
+  beginConnection $ \conn st rid nick -> do
+    let clients = Seq.singleton Client {cNickname = nick, cConn = conn}
+    atomically $ modifyTVar' st (IM.insert rid Room {rJoinable = True, rClients = clients})
+    sendTextData conn (TellRoomId rid)
+    playerListAnnouncer <- async $ announceNewPlayers st rid clients conn
+    d <- receiveData conn
+    case d of
+      ToldStartGame rounds -> do
+        cancel playerListAnnouncer
+        atomically $ modifyTVar' st (IM.adjust (\Room {..} -> Room {rJoinable = False, ..}) rid)
+        beginGame st rid rounds
+      _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
 joinRoom :: TVar ServerState -> Int -> T.Text -> ServerApp
-joinRoom = beginConnection $ \conn st rid nick -> do
-  join $ atomically $ do
-    rooms <- readTVar st
-    case IM.lookup rid rooms of
-      Just room
-        | rJoinable room -> do
-          let newClient = Client {cNickname = nick, cConn = conn}
-          writeTVar st (IM.insert rid room {rClients = rClients room Seq.|> newClient} rooms)
-          pure (pure ())
-      _ -> pure $ sendClose conn ("Room does not exist." :: T.Text)
-
-  atomically $ do
-    rooms <- readTVar st
-    when (IM.member rid rooms) retry -- TODO make it be blocked on an MVar/TMVar for performance
+joinRoom =
+  beginConnection $ \conn st rid nick -> do
+    initialClients <-
+      join $
+      atomically $ do
+        rooms <- readTVar st
+        case IM.lookup rid rooms of
+          Just room
+            | rJoinable room -> do
+              let newClient = Client {cNickname = nick, cConn = conn}
+                  newClients = rClients room Seq.|> newClient
+              writeTVar st (IM.insert rid room {rClients = newClients} rooms)
+              pure (pure newClients)
+          _ -> pure $ sendClose conn ("Room does not exist." :: T.Text) >> pure Seq.empty
+    unless (Seq.null initialClients) $ do
+      race_ (announceNewPlayers st rid initialClients conn) $
+        atomically $ do
+          joinable <- (rJoinable . (IM.! rid)) <$> readTVar st
+          when joinable retry -- wait till the room is no longer joinable
+      atomically $ do
+        rooms <- readTVar st
+        when (IM.member rid rooms) retry -- TODO make it be blocked on an MVar/TMVar for performance
 
 raceSTM :: STM a -> STM b -> STM (Either a b)
 raceSTM a b = (Left <$> a) `orElse` (Right <$> b)
