@@ -1,7 +1,6 @@
 open ReasonReact
 open WebSockets
 
-
 (* A statement component. *)
 type statelessComp =
   ( stateless
@@ -150,7 +149,18 @@ end = struct
                         D.button_
                           (D.props ~type_:"button"
                              ~className:"btn btn-primary btn-lg btn-block"
-                             ~onClick:(fun _ -> WebSocket.sendString "abcd" ws)
+                             ~onClick:(fun _ ->
+                               let dict = Js.Dict.empty () in
+                               Js.Dict.set dict "tag"
+                                 (Js.Json.string "ToldStartGame") ;
+                               Js.Dict.set dict "contents"
+                                 (Js.Json.number
+                                    (float_of_int
+                                       (2 * Array.length room.participants))) ;
+                               let msg =
+                                 Js.Json.stringify (Js.Json.object_ dict)
+                               in
+                               WebSocket.sendString msg ws )
                              ())
                           [|string "Start Game Now"|]
                     | GameStateMachine.JoinGame (_, _) -> null |] ) }
