@@ -177,9 +177,9 @@ end = struct
     ; inStroke= ref false }
 
 
-  type state = {canvasRef: canvasState option ref; updateCount: int ref}
+  type state = {canvasRef: canvasState option ref; isReady: bool}
 
-  type action = unit
+  type action = IsReady
 
   let component = reducerComponent "Canvas"
 
@@ -187,9 +187,9 @@ end = struct
   let make ~editable ~moveCallback ~endCallback ~injectMoveCallback
       ~injectEndCallback _ =
     { component with
-      initialState= (fun _ -> {canvasRef= ref None; updateCount= ref 0})
-    ; reducer= (fun () _ -> NoUpdate)
-    ; shouldUpdate= (fun s -> !(s.oldSelf.state.updateCount) < 2)
+      initialState= (fun _ -> {canvasRef= ref None; isReady=false})
+    ; reducer= (fun IsReady state -> Update {state with isReady=true})
+    ; shouldUpdate= (fun s -> not (s.oldSelf.state.isReady) )
     ; render=
         (fun self ->
           let realMove, realEnd, injectingMove, injectingEnd =
@@ -206,8 +206,8 @@ end = struct
                  (self.handle (fun theRef {state} ->
                       let r = Js.Nullable.toOption theRef in
                       state.canvasRef := Belt.Option.map r create ;
-                      state.updateCount := !(state.updateCount) + 1 ;
-                      () ))
+                      self.send(IsReady)
+                       ))
                ~onTouchStart:(if editable then realMove else fun _ -> ())
                ~onTouchMove:(if editable then realMove else fun _ -> ())
                ~onTouchEnd:(if editable then realEnd else fun _ -> ())
