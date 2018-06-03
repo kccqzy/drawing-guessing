@@ -52,8 +52,6 @@ end = struct
   type canvasState =
     { canvas: Dom.element
     ; ctx: Canvas2dRe.t
-    ; clientWidth: float
-    ; clientHeight: float
     ; scaleFactor: float
     ; currentStroke: (float * float) array
     ; currentStrokeHasDrawn: bool ref
@@ -197,8 +195,6 @@ end = struct
     lineWidth ctx (3.0 *. scaleFactor) ;
     { canvas
     ; ctx
-    ; clientWidth
-    ; clientHeight= float_of_int (ElementRe.clientHeight canvas)
     ; scaleFactor
     ; currentStroke= [||]
     ; currentStrokeHasDrawn= ref false
@@ -275,9 +271,9 @@ type gamestate =
   | Invalid
   | WaitForRoomId
   | WaitForGameStart of room
-  | WaitForRoundStart of room * round
-  | InRound of room * round * inround
-  | AfterRound of room * round * afterround
+  | WaitForRoundStart of round
+  | InRound of round * inround
+  | AfterRound of round * afterround
   | AfterGame of string option array
 
 module Game : sig
@@ -317,20 +313,17 @@ end = struct
         WaitForGameStart
           { room with
             participants= js |> JD.field "contents" (JD.array JD.string) }
-    | "AnnounceRound", (WaitForGameStart room | AfterRound (room, _, _)) ->
+    | "AnnounceRound", (WaitForGameStart _ | AfterRound (_, _)) ->
         WaitForRoundStart
-          ( room
-          , let index, drawer =
-              js |> JD.(field "contents" (tuple2 JD.int JD.string))
-            in
-            {index; drawer; role= Guesser} )
-    | "TellMayStartRound", WaitForRoundStart (room, round) ->
-        WaitForRoundStart (room, {round with role= Drawer})
-    | "TellDrawerWord", WaitForRoundStart (room, round)
-      when round.role = Drawer ->
+          (let index, drawer =
+             js |> JD.(field "contents" (tuple2 JD.int JD.string))
+           in
+           {index; drawer; role= Guesser})
+    | "TellMayStartRound", WaitForRoundStart round ->
+        WaitForRoundStart {round with role= Drawer}
+    | "TellDrawerWord", WaitForRoundStart round when round.role = Drawer ->
         InRound
-          ( room
-          , round
+          ( round
           , let word = js |> JD.field "contents" JD.string in
             { word
             ; wordlength= String.length word
@@ -338,11 +331,9 @@ end = struct
             ; currentGuess= ""
             ; previousWrongGuess= None
             ; receivingDrawingCmd= ref (fun _ -> ()) } )
-    | "AnnounceWordLength", WaitForRoundStart (room, round)
-      when round.role = Guesser ->
+    | "AnnounceWordLength", WaitForRoundStart round when round.role = Guesser ->
         InRound
-          ( room
-          , round
+          ( round
           , let wordlength = js |> JD.field "contents" JD.int in
             { word= String.make wordlength '_'
             ; wordlength
@@ -350,26 +341,22 @@ end = struct
             ; currentGuess= ""
             ; previousWrongGuess= None
             ; receivingDrawingCmd= ref (fun _ -> ()) } )
-    | "AnnounceTimeLeft", InRound (room, round, inround) ->
+    | "AnnounceTimeLeft", InRound (round, inround) ->
         InRound
-          ( room
-          , round
-          , {inround with secondsleft= js |> JD.field "contents" JD.int} )
-    | "ReplyGuessIncorrect", InRound (room, round, inround) ->
+          (round, {inround with secondsleft= js |> JD.field "contents" JD.int})
+    | "ReplyGuessIncorrect", InRound (round, inround) ->
         InRound
-          ( room
-          , round
+          ( round
           , { inround with
               previousWrongGuess= Some (js |> JD.field "contents" JD.string)
             ; currentGuess= "" } )
-    | "EndRoundWithWinner", InRound (room, round, _) ->
-        AfterRound
-          (room, round, {winner= Some (js |> JD.field "contents" JD.string)})
-    | "EndRoundWithoutWinner", InRound (room, round, _) ->
-        AfterRound (room, round, {winner= None})
-    | "EndGameWithTally", AfterRound (_, _, _) ->
+    | "EndRoundWithWinner", InRound (round, _) ->
+        AfterRound (round, {winner= Some (js |> JD.field "contents" JD.string)})
+    | "EndRoundWithoutWinner", InRound (round, _) ->
+        AfterRound (round, {winner= None})
+    | "EndGameWithTally", AfterRound (_, _) ->
         AfterGame (js |> JD.field "contents" (JD.array (JD.optional JD.string)))
-    | "RelayDrawingCmd", InRound (_, _, inround) -> (
+    | "RelayDrawingCmd", InRound (_, inround) -> (
       match DrawingCmd.parse (js |> JD.field "contents" JD.string) with
       | Some cmd ->
           !(inround.receivingDrawingCmd) cmd ;
@@ -407,14 +394,13 @@ end = struct
               Update {state with st= transition state.st json}
           | UpdateCurrentGuess guess ->
             match state.st with
-            | InRound (room, round, inround)
+            | InRound (round, inround)
               when String.length guess <= inround.wordlength ->
                 Update
                   { state with
                     st=
                       InRound
-                        ( room
-                        , round
+                        ( round
                         , { inround with
                             currentGuess= Js.String.toLowerCase guess } ) }
             | _ -> NoUpdate )
@@ -506,7 +492,7 @@ end = struct
                            ())
                         [|string "Start Game Now"|]
                   | _ -> null |]
-          | Connected ws, WaitForRoundStart (_, round) ->
+          | Connected ws, WaitForRoundStart round ->
               D.div_ (D.props ())
                 [| D.h2_ (D.props ())
                      [|string ("Round " ^ string_of_int (round.index + 1))|]
@@ -526,7 +512,7 @@ end = struct
                              sendServer ws "ToldStartRound" None )
                            ())
                         [|string "Ready To Draw!"|] |]
-          | Connected ws, InRound (_, round, inround) ->
+          | Connected ws, InRound (round, inround) ->
               D.div_ (D.props ())
                 [| D.h2_ (D.props ())
                      [| string "Round "
@@ -606,7 +592,7 @@ end = struct
                                                   inround.currentGuess)) )
                                         ~type_:"button" ())
                                      [|string "Guess!"|] |] |] |] |]
-          | Connected ws, AfterRound (_, round, afterround) ->
+          | Connected ws, AfterRound (round, afterround) ->
               D.div_ (D.props ())
                 [| D.h1_
                      (D.props ~className:"display-4" ())
