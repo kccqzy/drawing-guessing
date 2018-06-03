@@ -448,7 +448,7 @@ end = struct
                            (fun i w ->
                              D.tr_ (D.props ())
                                [| D.th_ (D.props ())
-                                    [|string (string_of_int i)|]
+                                    [|string (string_of_int (i + 1))|]
                                ; D.th_ (D.props ())
                                    [| string
                                         ( match w with
