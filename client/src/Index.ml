@@ -14,16 +14,37 @@ type statelessComp =
 type ('s, 'a) reducerComp =
   ('s, 's, noRetainedProps, noRetainedProps, 'a) componentSpec
 
+module DrawingCmd : sig
+  type t = M of float * float | E
+
+  val parse : Js.String.t -> t option
+
+  val toString : t -> string
+end = struct
+  type t = M of float * float | E
+
+  let parse cmd =
+    let split = Js.String.split " " cmd in
+    match split.(0) with
+    | "M" -> Some (M (float_of_string split.(1), float_of_string split.(2)))
+    | "E" -> Some E
+    | _ -> None
+
+
+  let toString = function
+    | M (ctxX, ctxY) ->
+        "M " ^ string_of_float ctxX ^ " " ^ string_of_float ctxY
+    | E -> "E"
+end
+
 module Canvas : sig
   type state
 
   type action
 
   val make :
-    editable:bool -> moveCallback:(float * float -> unit)
-    -> endCallback:(unit -> unit)
-    -> injectMoveCallback:(float * float -> unit) ref
-    -> injectEndCallback:(unit -> unit) ref -> 'a
+    editable:bool -> sendDrawingCmd:(DrawingCmd.t -> unit)
+    -> receiveDrawingCmd:(DrawingCmd.t -> unit) ref -> 'a
     -> (state, action) reducerComp
 end = struct
   open Canvas2dRe
@@ -40,7 +61,7 @@ end = struct
 
   exception NothingToDraw
 
-  let setupEventListeners canvasst moveCallback endCallback =
+  let setupEventListeners canvasst sendDrawingCmd =
     let offsetX =
       float_of_int
         (HtmlElementRe.offsetLeft
@@ -54,8 +75,8 @@ end = struct
     let pushCurrentStroke touchPageX touchPageY =
       let ctxX = (touchPageX -. offsetX) *. canvasst.scaleFactor in
       let ctxY = (touchPageY -. offsetY) *. canvasst.scaleFactor in
-      ignore @@ Js.Array.push (ctxX, ctxY) (canvasst.currentStroke) ;
-      moveCallback (ctxX, ctxY)
+      ignore @@ Js.Array.push (ctxX, ctxY) canvasst.currentStroke ;
+      sendDrawingCmd (DrawingCmd.M (ctxX, ctxY))
     in
     let immediateStroke strokeWillEnd =
       let ipps = 8 in
@@ -64,7 +85,7 @@ end = struct
       in
       if not !(canvasst.inStroke) then (
         (* If this is the first part of a stroke; move to the desired location and etc. *)
-        ignore (Js.Array.push fstStroke (canvasst.currentStroke)) ;
+        ignore (Js.Array.push fstStroke canvasst.currentStroke) ;
         moveTo ~x:fstStrokeX ~y:fstStrokeY canvasst.ctx ;
         beginPath canvasst.ctx ;
         canvasst.inStroke := true )
@@ -73,14 +94,13 @@ end = struct
         (* If this is the last part of a stroke, duplicate the location for interpolation. *)
         ignore
         @@ Js.Array.push
-             (canvasst.currentStroke).(Array.length (canvasst.currentStroke)
-                                        - 1)
-             (canvasst.currentStroke) ;
+             (canvasst.currentStroke).(Array.length canvasst.currentStroke - 1)
+             canvasst.currentStroke ;
         () )
       else () ;
       (* Not enough strokes. It could be due to a single-point stroke for example. *)
       let isCurrentStrokeTooShort =
-        Js.Array.length (canvasst.currentStroke) < 4
+        Js.Array.length canvasst.currentStroke < 4
       in
       try
         if isCurrentStrokeTooShort then
@@ -93,9 +113,9 @@ end = struct
             fill canvasst.ctx )
           else ()
         else (
-          for i = 0 to Array.length (canvasst.currentStroke) - 4 do
+          for i = 0 to Array.length canvasst.currentStroke - 4 do
             let window =
-              Js.Array.slice ~start:i ~end_:(i + 4) (canvasst.currentStroke)
+              Js.Array.slice ~start:i ~end_:(i + 4) canvasst.currentStroke
             in
             lineTo ~x:(fst window.(1)) ~y:(snd window.(1)) canvasst.ctx ;
             for j = 1 to ipps - 1 do
@@ -120,29 +140,37 @@ end = struct
           canvasst.currentStrokeHasDrawn := true ;
           if strokeWillEnd then (
             closePath canvasst.ctx ;
-            ignore @@ Js.Array.spliceInPlace ~pos:0 ~remove:(Js.Array.length canvasst.currentStroke) ~add:([||]) canvasst.currentStroke ;
+            ignore
+            @@ Js.Array.spliceInPlace ~pos:0
+                 ~remove:(Js.Array.length canvasst.currentStroke)
+                 ~add:[||] canvasst.currentStroke ;
             canvasst.inStroke := false ;
             canvasst.currentStrokeHasDrawn := true )
           else
-            ignore @@ Js.Array.spliceInPlace ~pos:0 ~remove:(Js.Array.length canvasst.currentStroke - 3) ~add:([||])
-            canvasst.currentStroke
-             )
+            ignore
+            @@ Js.Array.spliceInPlace ~pos:0
+                 ~remove:(Js.Array.length canvasst.currentStroke - 3)
+                 ~add:[||] canvasst.currentStroke )
       with NothingToDraw -> ()
     in
     let touchStartOrMoveHandler e =
-      let pageX = ((Js.Array.from (Obj.magic (ReactEventRe.Touch.touches e))).(0))##pageX in
-      let pageY = ((Js.Array.from (Obj.magic (ReactEventRe.Touch.touches e))).(0))##pageY in
+      let pageX =
+        (Js.Array.from (Obj.magic (ReactEventRe.Touch.touches e))).(0) ## pageX
+      in
+      let pageY =
+        (Js.Array.from (Obj.magic (ReactEventRe.Touch.touches e))).(0) ## pageY
+      in
       ReactEventRe.Synthetic.preventDefault e ;
       pushCurrentStroke pageX pageY ;
       Webapi.requestAnimationFrame (fun _ -> immediateStroke false)
     in
     let touchEndHandler e =
       ReactEventRe.Synthetic.preventDefault e ;
-      endCallback () ;
+      sendDrawingCmd DrawingCmd.E ;
       Webapi.requestAnimationFrame (fun _ -> immediateStroke true)
     in
     let injectMoveHandler (ctxX, ctxY) =
-      ignore @@ Js.Array.push (ctxX, ctxY) (canvasst.currentStroke) ;
+      ignore @@ Js.Array.push (ctxX, ctxY) canvasst.currentStroke ;
       Webapi.requestAnimationFrame (fun _ -> immediateStroke false)
     in
     let injectEndHandler () =
@@ -184,30 +212,29 @@ end = struct
   let component = reducerComponent "Canvas"
 
   (* Note: this component doesn't allow changing props. *)
-  let make ~editable ~moveCallback ~endCallback ~injectMoveCallback
-      ~injectEndCallback _ =
+  let make ~editable ~sendDrawingCmd ~receiveDrawingCmd _ =
     { component with
-      initialState= (fun _ -> {canvasRef= ref None; isReady=false})
-    ; reducer= (fun IsReady state -> Update {state with isReady=true})
-    ; shouldUpdate= (fun s -> not (s.oldSelf.state.isReady) )
+      initialState= (fun _ -> {canvasRef= ref None; isReady= false})
+    ; reducer= (fun IsReady state -> Update {state with isReady= true})
+    ; shouldUpdate= (fun s -> not s.oldSelf.state.isReady)
     ; render=
         (fun self ->
           let realMove, realEnd, injectingMove, injectingEnd =
             match !(self.state.canvasRef) with
-            | Some canvasSt ->
-                setupEventListeners canvasSt moveCallback endCallback
+            | Some canvasSt -> setupEventListeners canvasSt sendDrawingCmd
             | _ -> ((fun _ -> ()), (fun _ -> ()), (fun _ -> ()), fun _ -> ())
           in
-          injectMoveCallback := injectingMove ;
-          injectEndCallback := injectingEnd ;
+          ( receiveDrawingCmd
+          := function
+            | DrawingCmd.M (ctxX, ctxY) -> injectingMove (ctxX, ctxY)
+            | DrawingCmd.E -> injectingEnd () ) ;
           D.canvas_
             (D.props
                ~ref:
                  (self.handle (fun theRef {state} ->
                       let r = Js.Nullable.toOption theRef in
                       state.canvasRef := Belt.Option.map r create ;
-                      self.send(IsReady)
-                       ))
+                      self.send IsReady ))
                ~onTouchStart:(if editable then realMove else fun _ -> ())
                ~onTouchMove:(if editable then realMove else fun _ -> ())
                ~onTouchEnd:(if editable then realEnd else fun _ -> ())
@@ -240,8 +267,7 @@ type inround =
   ; secondsleft: int
   ; currentGuess: string
   ; previousWrongGuess: string option
-  ; moveInjector: (float * float -> unit) ref
-  ; endInjector: (unit -> unit) ref }
+  ; receivingDrawingCmd: (DrawingCmd.t -> unit) ref }
 
 type afterround = {winner: string option}
 
@@ -311,8 +337,7 @@ end = struct
             ; secondsleft= 90
             ; currentGuess= ""
             ; previousWrongGuess= None
-            ; endInjector= ref (fun _ -> ())
-            ; moveInjector= ref (fun _ -> ()) } )
+            ; receivingDrawingCmd= ref (fun _ -> ()) } )
     | "AnnounceWordLength", WaitForRoundStart (room, round)
       when round.role = Guesser ->
         InRound
@@ -324,8 +349,7 @@ end = struct
             ; secondsleft= 90
             ; currentGuess= ""
             ; previousWrongGuess= None
-            ; endInjector= ref (fun _ -> ())
-            ; moveInjector= ref (fun _ -> ()) } )
+            ; receivingDrawingCmd= ref (fun _ -> ()) } )
     | "AnnounceTimeLeft", InRound (room, round, inround) ->
         InRound
           ( room
@@ -346,17 +370,11 @@ end = struct
     | "EndGameWithTally", AfterRound (_, _, _) ->
         AfterGame (js |> JD.field "contents" (JD.array (JD.optional JD.string)))
     | "RelayDrawingCmd", InRound (_, _, inround) -> (
-        let cmd = js |> JD.field "contents" JD.string in
-        let split = Js.String.split " " cmd in
-        match split.(0) with
-        | "M" ->
-            !(inround.moveInjector)
-              (float_of_string split.(1), float_of_string split.(2)) ;
-            st
-        | "E" ->
-            !(inround.endInjector) () ;
-            st
-        | _ -> Invalid )
+      match DrawingCmd.parse (js |> JD.field "contents" JD.string) with
+      | Some cmd ->
+          !(inround.receivingDrawingCmd) cmd ;
+          st
+      | _ -> Invalid )
     | _ -> Invalid
 
 
@@ -539,17 +557,13 @@ end = struct
                               ( match round.role with
                               | Guesser -> false
                               | Drawer -> true )
-                            ~moveCallback:(fun (ctxX, ctxY) ->
+                            ~sendDrawingCmd:(fun cmd ->
                               sendServer ws "GotDrawingCmd"
                                 (Some
-                                   (Js.Json.string
-                                      ( "M " ^ string_of_float ctxX ^ " "
-                                      ^ string_of_float ctxY ))) )
-                            ~endCallback:(fun () ->
-                              sendServer ws "GotDrawingCmd"
-                                (Some (Js.Json.string "E")) )
-                            ~injectMoveCallback:inround.moveInjector
-                            ~injectEndCallback:inround.endInjector [||]) |]
+                                   (Js.Json.string (DrawingCmd.toString cmd)))
+                              )
+                            ~receiveDrawingCmd:inround.receivingDrawingCmd [||])
+                    |]
                 ; match round.role with
                   | Drawer -> null
                   | Guesser ->
