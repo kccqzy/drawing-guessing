@@ -34,9 +34,8 @@ end = struct
     ; clientWidth: float
     ; clientHeight: float
     ; scaleFactor: float
-    ; currentStroke: (float * float) array ref
+    ; currentStroke: (float * float) array
     ; currentStrokeHasDrawn: bool ref
-    ; hasDrawn: bool ref
     ; inStroke: bool ref }
 
   exception NothingToDraw
@@ -55,18 +54,17 @@ end = struct
     let pushCurrentStroke touchPageX touchPageY =
       let ctxX = (touchPageX -. offsetX) *. canvasst.scaleFactor in
       let ctxY = (touchPageY -. offsetY) *. canvasst.scaleFactor in
-      ignore @@ Js.Array.push (ctxX, ctxY) !(canvasst.currentStroke) ;
+      ignore @@ Js.Array.push (ctxX, ctxY) (canvasst.currentStroke) ;
       moveCallback (ctxX, ctxY)
     in
     let immediateStroke strokeWillEnd =
       let ipps = 8 in
-      canvasst.hasDrawn := true ;
       let (fstStrokeX, fstStrokeY) as fstStroke =
-        !(canvasst.currentStroke).(0)
+        (canvasst.currentStroke).(0)
       in
       if not !(canvasst.inStroke) then (
         (* If this is the first part of a stroke; move to the desired location and etc. *)
-        ignore (Js.Array.push fstStroke !(canvasst.currentStroke)) ;
+        ignore (Js.Array.push fstStroke (canvasst.currentStroke)) ;
         moveTo ~x:fstStrokeX ~y:fstStrokeY canvasst.ctx ;
         beginPath canvasst.ctx ;
         canvasst.inStroke := true )
@@ -75,14 +73,14 @@ end = struct
         (* If this is the last part of a stroke, duplicate the location for interpolation. *)
         ignore
         @@ Js.Array.push
-             !(canvasst.currentStroke).(Array.length !(canvasst.currentStroke)
+             (canvasst.currentStroke).(Array.length (canvasst.currentStroke)
                                         - 1)
-             !(canvasst.currentStroke) ;
+             (canvasst.currentStroke) ;
         () )
       else () ;
       (* Not enough strokes. It could be due to a single-point stroke for example. *)
       let isCurrentStrokeTooShort =
-        Js.Array.length !(canvasst.currentStroke) < 4
+        Js.Array.length (canvasst.currentStroke) < 4
       in
       try
         if isCurrentStrokeTooShort then
@@ -95,9 +93,9 @@ end = struct
             fill canvasst.ctx )
           else ()
         else (
-          for i = 0 to Array.length !(canvasst.currentStroke) - 4 do
+          for i = 0 to Array.length (canvasst.currentStroke) - 4 do
             let window =
-              Js.Array.slice ~start:i ~end_:(i + 4) !(canvasst.currentStroke)
+              Js.Array.slice ~start:i ~end_:(i + 4) (canvasst.currentStroke)
             in
             lineTo ~x:(fst window.(1)) ~y:(snd window.(1)) canvasst.ctx ;
             for j = 1 to ipps - 1 do
@@ -122,12 +120,13 @@ end = struct
           canvasst.currentStrokeHasDrawn := true ;
           if strokeWillEnd then (
             closePath canvasst.ctx ;
-            canvasst.currentStroke := [||] ;
+            ignore @@ Js.Array.spliceInPlace ~pos:0 ~remove:(Js.Array.length canvasst.currentStroke) ~add:([||]) canvasst.currentStroke ;
             canvasst.inStroke := false ;
             canvasst.currentStrokeHasDrawn := true )
           else
+            ignore @@ Js.Array.spliceInPlace ~pos:0 ~remove:(Js.Array.length canvasst.currentStroke - 3) ~add:([||])
             canvasst.currentStroke
-            := Js.Array.sliceFrom (-3) !(canvasst.currentStroke) )
+             )
       with NothingToDraw -> ()
     in
     let getPageX =
@@ -149,7 +148,7 @@ end = struct
       Webapi.requestAnimationFrame (fun _ -> immediateStroke true)
     in
     let injectMoveHandler (ctxX, ctxY) =
-      ignore @@ Js.Array.push (ctxX, ctxY) !(canvasst.currentStroke) ;
+      ignore @@ Js.Array.push (ctxX, ctxY) (canvasst.currentStroke) ;
       Webapi.requestAnimationFrame (fun _ -> immediateStroke false)
     in
     let injectEndHandler () =
@@ -179,9 +178,8 @@ end = struct
     ; clientWidth
     ; clientHeight= float_of_int (ElementRe.clientHeight canvas)
     ; scaleFactor
-    ; currentStroke= ref [||]
+    ; currentStroke= [||]
     ; currentStrokeHasDrawn= ref false
-    ; hasDrawn= ref false
     ; inStroke= ref false }
 
 
@@ -444,8 +442,8 @@ end = struct
                               [| D.th_ (D.props ()) [|string "Round #"|]
                               ; D.th_ (D.props ()) [|string "Winner"|] |] |]
                     ; D.tbody_ (D.props ())
-                        (Array.mapi
-                           (fun i w ->
+                        (Js.Array.mapi
+                           (fun w i ->
                              D.tr_ (D.props ())
                                [| D.th_ (D.props ())
                                     [|string (string_of_int (i + 1))|]
@@ -478,7 +476,7 @@ end = struct
                 ; D.div_ (D.props ())
                     [| D.p_ (D.props ()) [|string "Current players:"|]
                     ; D.ul_ (D.props ())
-                        (Array.map
+                        (Js.Array.map
                            (fun p -> D.li_ (D.props ()) [|string p|])
                            room.participants) |]
                 ; match gametype with
