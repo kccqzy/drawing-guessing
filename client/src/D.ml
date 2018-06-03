@@ -33,3 +33,15 @@ let canvas_ p = ReasonReact.createDomElement "canvas" ~props:(Obj.magic p)
 let strong_ p = ReasonReact.createDomElement "strong" ~props:(Obj.magic p)
 
 let hr_ p = ReasonReact.createDomElement "hr" ~props:(Obj.magic p)
+
+let table_ p = ReasonReact.createDomElement "table" ~props:(Obj.magic p)
+
+let thead_ p = ReasonReact.createDomElement "thead" ~props:(Obj.magic p)
+
+let tbody_ p = ReasonReact.createDomElement "tbody" ~props:(Obj.magic p)
+
+let tr_ p = ReasonReact.createDomElement "tr" ~props:(Obj.magic p)
+
+let th_ p = ReasonReact.createDomElement "th" ~props:(Obj.magic p)
+
+let td_ p = ReasonReact.createDomElement "td" ~props:(Obj.magic p)

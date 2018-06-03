@@ -74,6 +74,7 @@ type gamestate =
   | WaitForRoundStart of room * round
   | InRound of room * round * inround
   | AfterRound of room * round * afterround
+  | AfterGame of string option array
 
 module Game : sig
   type state
@@ -112,7 +113,7 @@ end = struct
         WaitForGameStart
           { room with
             participants= js |> JD.field "contents" (JD.array JD.string) }
-    | "AnnounceRound", (WaitForGameStart room | AfterRound(room, _, _) ) ->
+    | "AnnounceRound", (WaitForGameStart room | AfterRound (room, _, _)) ->
         WaitForRoundStart
           ( room
           , let index, drawer =
@@ -160,6 +161,8 @@ end = struct
           (room, round, {winner= Some (js |> JD.field "contents" JD.string)})
     | "EndRoundWithoutWinner", InRound (room, round, _) ->
         AfterRound (room, round, {winner= None})
+    | "EndGameWithTally", AfterRound (_, _, _) ->
+        AfterGame (js |> JD.field "contents" (JD.array (JD.optional JD.string)))
     | _ -> Invalid
 
 
@@ -222,177 +225,195 @@ end = struct
           self.send (SetConnectionState (Connecting ws)) )
     ; render=
         (fun self ->
-          match self.state.conn with
-          | WillConnect | Connecting _ ->
+          match (self.state.conn, self.state.st) with
+          | (WillConnect | Connecting _), _ ->
               D.div_
                 (D.props ~className:"alert alert-primary" ~role:"alert" ())
                 [|string "Connecting to server..."|]
-          | ConnectionLost ->
+          | _, AfterGame winners ->
+              D.div_ (D.props ())
+                [| D.h1_
+                     (D.props ~className:"display-4" ())
+                     [|string "Game ended"|]
+                ; D.table_
+                    (D.props ~className:"table" ())
+                    [| D.thead_ (D.props ())
+                         [| D.tr_ (D.props ())
+                              [| D.th_ (D.props ()) [|string "Round #"|]
+                              ; D.th_ (D.props ()) [|string "Winner"|] |] |]
+                    ; D.tbody_ (D.props ())
+                        (Array.mapi
+                           (fun i w ->
+                             D.tr_ (D.props ())
+                               [| D.th_ (D.props ())
+                                    [|string (string_of_int i)|]
+                               ; D.th_ (D.props ())
+                                   [| string
+                                        ( match w with
+                                        | Some ww -> ww
+                                        | None -> {j|—|j} ) |] |] )
+                           winners) |] |]
+          | ConnectionLost, _ ->
               D.div_
                 (D.props ~className:"alert alert-danger" ~role:"alert" ())
                 [|string "Connection lost. Sorry."|]
-          | Connected ws ->
-            match self.state.st with
-            | Invalid ->
-                D.div_
-                  (D.props ~className:"alert alert-danger" ~role:"alert" ())
-                  [|string "Sorry, the server encountered an error."|]
-            | WaitForRoomId ->
-                D.div_
-                  (D.props ~className:"alert alert-primary" ~role:"alert" ())
-                  [|string "Waiting for the server to tell us the Game PIN."|]
-            | WaitForGameStart room ->
-                D.div_ (D.props ())
-                  [| D.h2_ (D.props ()) [|string {j|Get Ready…|j}|]
-                  ; D.div_
-                      (D.props ~className:"alert alert-primary" ~role:"alert"
-                         ())
-                      [| string
-                           ( "Invite your friends to join the game! Use this Game PIN: "
-                           ^ string_of_int room.rid ) |]
-                  ; D.div_ (D.props ())
-                      [| D.p_ (D.props ()) [|string "Current players:"|]
-                      ; D.ul_ (D.props ())
-                          (Array.map
-                             (fun p -> D.li_ (D.props ()) [|string p|])
-                             room.participants) |]
-                  ; match gametype with
-                    | NewGame _ when Array.length room.participants >= 2 ->
-                        D.button_
-                          (D.props ~type_:"button"
-                             ~className:"btn btn-primary btn-lg btn-block"
-                             ~onClick:(fun _ ->
-                               sendServer ws "ToldStartGame"
-                                 (Some
-                                    (Js.Json.number
-                                       (float_of_int
-                                          (2 * Array.length room.participants))))
-                               )
-                             ())
-                          [|string "Start Game Now"|]
-                    | _ -> null |]
-            | WaitForRoundStart (_, round) ->
-                D.div_ (D.props ())
-                  [| D.h2_ (D.props ())
-                       [|string ("Round " ^ string_of_int (round.index + 1))|]
-                  ; D.div_
-                      (D.props ~className:"alert alert-primary" ~role:"alert"
-                         ())
-                      [| string
-                           ( "Round " ^ string_of_int (round.index + 1)
-                           ^ " is about to start! This round, " ^ round.drawer
-                           ^ " will draw and everyone else will guess." ) |]
-                  ; match round.role with
-                    | Guesser -> null
-                    | Drawer ->
-                        D.button_
-                          (D.props ~type_:"button"
-                             ~className:"btn btn-primary btn-lg btn-block"
-                             ~onClick:(fun _ ->
-                               sendServer ws "ToldStartRound" None )
-                             ())
-                          [|string "Ready To Draw!"|] |]
-            | InRound (_, round, inround) ->
-                D.div_ (D.props ())
-                  [| D.h2_ (D.props ())
-                       [| string "Round "
-                       ; D.strong_ (D.props ())
-                           [|string (string_of_int (round.index + 1))|] |]
-                  ; D.div_
-                      (D.props
-                         ~className:
-                           ( if inround.secondsleft > 15 then
-                               "alert alert-primary"
-                           else "alert alert-danger" )
-                         ~role:"alert" ())
-                      [| string "Time left in this round: "
-                      ; D.strong_ (D.props ())
-                          [|string (string_of_int inround.secondsleft)|] |]
-                  ; D.pre_
-                      (D.props
-                         ~style:
-                           (D.Style.make ~textTransform:"uppercase"
-                              ~fontWeight:"bold" ~fontSize:"1.5rem"
-                              ~textAlign:"center" ~letterSpacing:"0.3em" ())
-                         ())
-                      [|string inround.word|]
-                  ; D.div_ (D.props ())
-                      [| element
-                           (Canvas.make
-                              ~editable:
-                                ( match round.role with
-                                | Guesser -> false
-                                | Drawer -> true )
-                              [||]) |]
-                  ; match round.role with
-                    | Drawer -> null
-                    | Guesser ->
-                        let previousGuessFeedback =
-                          match inround.previousWrongGuess with
-                          | None -> null
-                          | Some wrong ->
-                              D.div_
-                                (D.props ~className:"alert alert-danger" ())
-                                [|string {j|"$wrong" is wrong. Try Again.|j}|]
-                        in
-                        D.div_ (D.props ())
-                          [| previousGuessFeedback
-                          ; D.div_
-                              (D.props ~className:"input-group" ())
-                              [| D.input_
-                                   (D.props ~type_:"text"
-                                      ~className:"form-control"
-                                      ~value:inround.currentGuess
-                                      ~style:
-                                        (D.Style.make
-                                           ~textTransform:"uppercase" ())
-                                      ~onChange:(fun e ->
-                                        self.send
-                                          (UpdateCurrentGuess (D.targetVal e))
-                                        )
-                                      ~placeholder:"Type a guess here" ())
-                                   [||]
-                              ; D.div_
-                                  (D.props ~className:"input-group-append" ())
-                                  [| D.button_
-                                       (D.props
-                                          ~disabled:
-                                            ( String.length inround.currentGuess
-                                            != inround.wordlength )
-                                          ~className:"btn btn-primary"
-                                          ~onClick:(fun _ ->
-                                            sendServer ws "GotGuess"
-                                              (Some
-                                                 (Js.Json.string
-                                                    inround.currentGuess)) )
-                                          ~type_:"button" ())
-                                       [|string "Guess!"|] |] |] |] |]
-            | AfterRound (_, round, afterround) ->
-                D.div_ (D.props ())
-                  [| D.h1_
-                       (D.props ~className:"display-4" ())
-                       [| match afterround.winner with
-                          | None -> string "No one guessed correctly :("
-                          | Some w -> string {j|Congrats, $w!|j} |]
-                  ; D.p_
-                      (D.props ~className:"lead" ())
-                      [| string
-                           ( "Round " ^ string_of_int (round.index + 1)
-                           ^ " just ended." ) |]
-                  ; D.hr_ (D.props ~className:"my-4" ()) [||]
-                  ; D.p_ (D.props ())
-                      [| string
-                           "Catch a breath, reflect on the experience, and maybe move on!"
-                      |]
-                  ; match round.role with
-                    | Guesser -> null
-                    | Drawer ->
-                        D.button_
-                          (D.props
-                             ~onClick:(fun _ ->
-                               sendServer ws "ToldNextRound" None )
-                             ~className:"btn btn-primary btn-lg" ())
-                          [|string "Continue"|] |] ) }
+          | _, Invalid ->
+              D.div_
+                (D.props ~className:"alert alert-danger" ~role:"alert" ())
+                [|string "Sorry, the server encountered an error."|]
+          | Connected _, WaitForRoomId ->
+              D.div_
+                (D.props ~className:"alert alert-primary" ~role:"alert" ())
+                [|string "Waiting for the server to tell us the Game PIN."|]
+          | Connected ws, WaitForGameStart room ->
+              D.div_ (D.props ())
+                [| D.h2_ (D.props ()) [|string {j|Get Ready…|j}|]
+                ; D.div_
+                    (D.props ~className:"alert alert-primary" ~role:"alert" ())
+                    [| string
+                         ( "Invite your friends to join the game! Use this Game PIN: "
+                         ^ string_of_int room.rid ) |]
+                ; D.div_ (D.props ())
+                    [| D.p_ (D.props ()) [|string "Current players:"|]
+                    ; D.ul_ (D.props ())
+                        (Array.map
+                           (fun p -> D.li_ (D.props ()) [|string p|])
+                           room.participants) |]
+                ; match gametype with
+                  | NewGame _ when Array.length room.participants >= 2 ->
+                      D.button_
+                        (D.props ~type_:"button"
+                           ~className:"btn btn-primary btn-lg btn-block"
+                           ~onClick:(fun _ ->
+                             sendServer ws "ToldStartGame"
+                               (Some
+                                  (Js.Json.number
+                                     (float_of_int
+                                        (2 * Array.length room.participants))))
+                             )
+                           ())
+                        [|string "Start Game Now"|]
+                  | _ -> null |]
+          | Connected ws, WaitForRoundStart (_, round) ->
+              D.div_ (D.props ())
+                [| D.h2_ (D.props ())
+                     [|string ("Round " ^ string_of_int (round.index + 1))|]
+                ; D.div_
+                    (D.props ~className:"alert alert-primary" ~role:"alert" ())
+                    [| string
+                         ( "Round " ^ string_of_int (round.index + 1)
+                         ^ " is about to start! This round, " ^ round.drawer
+                         ^ " will draw and everyone else will guess." ) |]
+                ; match round.role with
+                  | Guesser -> null
+                  | Drawer ->
+                      D.button_
+                        (D.props ~type_:"button"
+                           ~className:"btn btn-primary btn-lg btn-block"
+                           ~onClick:(fun _ ->
+                             sendServer ws "ToldStartRound" None )
+                           ())
+                        [|string "Ready To Draw!"|] |]
+          | Connected ws, InRound (_, round, inround) ->
+              D.div_ (D.props ())
+                [| D.h2_ (D.props ())
+                     [| string "Round "
+                     ; D.strong_ (D.props ())
+                         [|string (string_of_int (round.index + 1))|] |]
+                ; D.div_
+                    (D.props
+                       ~className:
+                         ( if inround.secondsleft > 15 then
+                             "alert alert-primary"
+                         else "alert alert-danger" )
+                       ~role:"alert" ())
+                    [| string "Time left in this round: "
+                    ; D.strong_ (D.props ())
+                        [|string (string_of_int inround.secondsleft)|] |]
+                ; D.pre_
+                    (D.props
+                       ~style:
+                         (D.Style.make ~textTransform:"uppercase"
+                            ~fontWeight:"bold" ~fontSize:"1.5rem"
+                            ~textAlign:"center" ~letterSpacing:"0.3em" ())
+                       ())
+                    [|string inround.word|]
+                ; D.div_ (D.props ())
+                    [| element
+                         (Canvas.make
+                            ~editable:
+                              ( match round.role with
+                              | Guesser -> false
+                              | Drawer -> true )
+                            [||]) |]
+                ; match round.role with
+                  | Drawer -> null
+                  | Guesser ->
+                      let previousGuessFeedback =
+                        match inround.previousWrongGuess with
+                        | None -> null
+                        | Some wrong ->
+                            D.div_
+                              (D.props ~className:"alert alert-danger" ())
+                              [|string {j|"$wrong" is wrong. Try Again.|j}|]
+                      in
+                      D.div_ (D.props ())
+                        [| previousGuessFeedback
+                        ; D.div_
+                            (D.props ~className:"input-group" ())
+                            [| D.input_
+                                 (D.props ~type_:"text"
+                                    ~className:"form-control"
+                                    ~value:inround.currentGuess
+                                    ~style:
+                                      (D.Style.make ~textTransform:"uppercase"
+                                         ())
+                                    ~onChange:(fun e ->
+                                      self.send
+                                        (UpdateCurrentGuess (D.targetVal e)) )
+                                    ~placeholder:"Type a guess here" ())
+                                 [||]
+                            ; D.div_
+                                (D.props ~className:"input-group-append" ())
+                                [| D.button_
+                                     (D.props
+                                        ~disabled:
+                                          ( String.length inround.currentGuess
+                                          != inround.wordlength )
+                                        ~className:"btn btn-primary"
+                                        ~onClick:(fun _ ->
+                                          sendServer ws "GotGuess"
+                                            (Some
+                                               (Js.Json.string
+                                                  inround.currentGuess)) )
+                                        ~type_:"button" ())
+                                     [|string "Guess!"|] |] |] |] |]
+          | Connected ws, AfterRound (_, round, afterround) ->
+              D.div_ (D.props ())
+                [| D.h1_
+                     (D.props ~className:"display-4" ())
+                     [| match afterround.winner with
+                        | None -> string "No one guessed correctly :("
+                        | Some w -> string {j|Congrats, $w!|j} |]
+                ; D.p_
+                    (D.props ~className:"lead" ())
+                    [| string
+                         ( "Round " ^ string_of_int (round.index + 1)
+                         ^ " just ended." ) |]
+                ; D.hr_ (D.props ~className:"my-4" ()) [||]
+                ; D.p_ (D.props ())
+                    [| string
+                         "Catch a breath, reflect on the experience, and maybe move on!"
+                    |]
+                ; match round.role with
+                  | Guesser -> null
+                  | Drawer ->
+                      D.button_
+                        (D.props
+                           ~onClick:(fun _ ->
+                             sendServer ws "ToldNextRound" None )
+                           ~className:"btn btn-primary btn-lg" ())
+                        [|string "Continue"|] |] ) }
 end
 
 module Page : sig

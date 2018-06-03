@@ -30,3 +30,15 @@ val canvas_ : el
 val strong_ : el
 
 val hr_ : el
+
+val table_ : el
+
+val thead_ : el
+
+val tbody_ : el
+
+val tr_ : el
+
+val th_ : el
+
+val td_ : el
