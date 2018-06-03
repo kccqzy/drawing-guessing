@@ -224,6 +224,7 @@ end = struct
           := function
             | DrawingCmd.M (ctxX, ctxY) -> injectingMove (ctxX, ctxY)
             | DrawingCmd.E -> injectingEnd () ) ;
+          self.onUnmount (fun _ -> receiveDrawingCmd := fun _ -> ()) ;
           D.canvas_
             (D.props
                ~ref:
@@ -420,6 +421,7 @@ end = struct
           |> WebSocket.on
              @@ Error (fun _ -> self.send (SetConnectionState ConnectionLost))
           |> ignore ;
+          self.onUnmount (fun _ -> WebSocket.close () ws) ;
           self.send (SetConnectionState (Connecting ws)) )
     ; render=
         (fun self ->
