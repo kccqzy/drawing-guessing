@@ -129,15 +129,9 @@ end = struct
              )
       with NothingToDraw -> ()
     in
-    let getPageX =
-      [%raw {| function(e){ return +e.nativeEvent.touches[0].pageX; }  |}]
-    in
-    let getPageY =
-      [%raw {| function(e){ return +e.nativeEvent.touches[0].pageY; }  |}]
-    in
     let touchStartOrMoveHandler e =
-      let pageX = getPageX e in
-      let pageY = getPageY e in
+      let pageX = ((Js.Array.from (Obj.magic (ReactEventRe.Touch.touches e))).(0))##pageX in
+      let pageY = ((Js.Array.from (Obj.magic (ReactEventRe.Touch.touches e))).(0))##pageY in
       ReactEventRe.Synthetic.preventDefault e ;
       pushCurrentStroke pageX pageY ;
       Webapi.requestAnimationFrame (fun _ -> immediateStroke false)
