@@ -232,14 +232,14 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
           guesserThread name readQueue conn = do
             chan <- atomically $ dupTChan drawingChan
             -- A triple race between: (a) winner found, (b) got message from the drawing chan, (c) got message from the read queue
-            d <- atomically (raceSTM (raceSTM (readTQueue readQueue) (readTChan chan)) (readTMVar winner))
-            case d of
-              Right _ -> pure ()
-              Left (Right t) -> sendTextData conn (RelayDrawingCmd t) >> guesserThread name readQueue conn
-              Left (Left (GotGuess w)) | w == wd -> atomically (putTMVar winner name)
-                                       | otherwise -> sendTextData conn (ReplyGuessIncorrect w)
-              _ -> throwIO (ErrorCall "Malicious client: State violation.")
-
+            let loop =
+                  atomically (raceSTM (raceSTM (readTQueue readQueue) (readTChan chan)) (readTMVar winner)) >>= \case
+                    Right _ -> pure ()
+                    Left (Right t) -> sendTextData conn (RelayDrawingCmd t) >> loop
+                    Left (Left (GotGuess w)) | w == wd -> atomically (putTMVar winner name)
+                                             | otherwise -> sendTextData conn (ReplyGuessIncorrect w) >> loop
+                    _ -> throwIO (ErrorCall "Malicious client: State violation.")
+            loop
           actions =
             drawerThread drawerConn : map (\(name, readQueue, _, conn) -> guesserThread name readQueue conn) (IM.elems guessers)
 
@@ -251,7 +251,6 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
     atomically (readTQueue drawerQueue) >>= \case
       ToldNextRound -> pure ()
       _ -> throwIO (ErrorCall "Malicious client: State violation.")
-    forM_ clients' $ \(_, queue, _, _) -> atomically (void (flushTQueue queue))
     case r of
       Left _ -> pure Nothing
       Right w -> pure (Just w)
