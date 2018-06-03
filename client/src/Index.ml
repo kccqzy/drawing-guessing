@@ -19,7 +19,12 @@ module Canvas : sig
 
   type action
 
-  val make : editable:bool -> 'a -> (state, action) reducerComp
+  val make :
+    editable:bool -> moveCallback:(float * float -> unit)
+    -> endCallback:(unit -> unit)
+    -> injectMoveCallback:(float * float -> unit) ref
+    -> injectEndCallback:(unit -> unit) ref -> 'a
+    -> (state, action) reducerComp
 end = struct
   open Canvas2dRe
 
@@ -36,7 +41,7 @@ end = struct
 
   exception NothingToDraw
 
-  let setupEventListeners canvasst =
+  let setupEventListeners canvasst moveCallback endCallback =
     let offsetX =
       float_of_int
         (HtmlElementRe.offsetLeft
@@ -50,7 +55,8 @@ end = struct
     let pushCurrentStroke touchPageX touchPageY =
       let ctxX = (touchPageX -. offsetX) *. canvasst.scaleFactor in
       let ctxY = (touchPageY -. offsetY) *. canvasst.scaleFactor in
-      ignore @@ Js.Array.push (ctxX, ctxY) !(canvasst.currentStroke)
+      ignore @@ Js.Array.push (ctxX, ctxY) !(canvasst.currentStroke) ;
+      moveCallback (ctxX, ctxY)
     in
     let immediateStroke strokeWillEnd =
       let ipps = 8 in
@@ -134,16 +140,25 @@ end = struct
       let pageX = getPageX e in
       let pageY = getPageY e in
       ReactEventRe.Synthetic.preventDefault e ;
-      Webapi.requestAnimationFrame (fun _ ->
-          pushCurrentStroke pageX pageY ;
-          immediateStroke false )
+      pushCurrentStroke pageX pageY ;
+      Webapi.requestAnimationFrame (fun _ -> immediateStroke false)
     in
     let touchEndHandler e =
       ReactEventRe.Synthetic.preventDefault e ;
-      Js.log "Gotten touchend event" ;
+      endCallback () ;
       Webapi.requestAnimationFrame (fun _ -> immediateStroke true)
     in
-    (touchStartOrMoveHandler, touchEndHandler)
+    let injectMoveHandler (ctxX, ctxY) =
+      ignore @@ Js.Array.push (ctxX, ctxY) !(canvasst.currentStroke) ;
+      Webapi.requestAnimationFrame (fun _ -> immediateStroke false)
+    in
+    let injectEndHandler () =
+      Webapi.requestAnimationFrame (fun _ -> immediateStroke true)
+    in
+    ( touchStartOrMoveHandler
+    , touchEndHandler
+    , injectMoveHandler
+    , injectEndHandler )
 
 
   let create canvas =
@@ -157,7 +172,6 @@ end = struct
       | Some w -> float_of_string w )
       /. clientWidth
     in
-    Js.log scaleFactor ;
     lineCap ctx LineCap.round ;
     lineWidth ctx (3.0 *. scaleFactor) ;
     { canvas
@@ -178,31 +192,33 @@ end = struct
   let component = reducerComponent "Canvas"
 
   (* Note: this component doesn't allow changing props. *)
-  let make ~editable _ =
+  let make ~editable ~moveCallback ~endCallback ~injectMoveCallback
+      ~injectEndCallback _ =
     { component with
       initialState= (fun _ -> {canvasRef= ref None; updateCount= ref 0})
     ; reducer= (fun () _ -> NoUpdate)
     ; shouldUpdate= (fun s -> !(s.oldSelf.state.updateCount) < 2)
     ; render=
         (fun self ->
-          Js.log "calling renderer for Canvas; dumping current state" ;
-          Js.log self.state ;
-          let handlers =
+          let realMove, realEnd, injectingMove, injectingEnd =
             match !(self.state.canvasRef) with
-            | Some canvasSt when editable ->
-                Js.log "will now set up event handlers" ;
-                setupEventListeners canvasSt
-            | _ -> ((fun _ -> ()), fun _ -> ())
+            | Some canvasSt ->
+                setupEventListeners canvasSt moveCallback endCallback
+            | _ -> ((fun _ -> ()), (fun _ -> ()), (fun _ -> ()), fun _ -> ())
           in
+          injectMoveCallback := injectingMove ;
+          injectEndCallback := injectingEnd ;
           D.canvas_
             (D.props
                ~ref:
                  (self.handle (fun theRef {state} ->
                       let r = Js.Nullable.toOption theRef in
                       state.canvasRef := Belt.Option.map r create ;
-                      state.updateCount := !(state.updateCount) + 1 ))
-               ~onTouchStart:(fst handlers) ~onTouchMove:(fst handlers)
-               ~onTouchEnd:(snd handlers)
+                      state.updateCount := !(state.updateCount) + 1 ;
+                      () ))
+               ~onTouchStart:(if editable then realMove else fun _ -> ())
+               ~onTouchMove:(if editable then realMove else fun _ -> ())
+               ~onTouchEnd:(if editable then realEnd else fun _ -> ())
                ~style:
                  (D.Style.make ~width:"calc(100vw - 30px)"
                     ~height:"calc((100vw - 30px) / 1.6 )"
@@ -231,7 +247,9 @@ type inround =
   ; word: string
   ; secondsleft: int
   ; currentGuess: string
-  ; previousWrongGuess: string option }
+  ; previousWrongGuess: string option
+  ; moveInjector: (float * float -> unit) ref
+  ; endInjector: (unit -> unit) ref }
 
 type afterround = {winner: string option}
 
@@ -300,7 +318,9 @@ end = struct
             ; wordlength= String.length word
             ; secondsleft= 90
             ; currentGuess= ""
-            ; previousWrongGuess= None } )
+            ; previousWrongGuess= None
+            ; endInjector= ref (fun _ -> ())
+            ; moveInjector= ref (fun _ -> ()) } )
     | "AnnounceWordLength", WaitForRoundStart (room, round)
       when round.role = Guesser ->
         InRound
@@ -311,7 +331,9 @@ end = struct
             ; wordlength
             ; secondsleft= 90
             ; currentGuess= ""
-            ; previousWrongGuess= None } )
+            ; previousWrongGuess= None
+            ; endInjector= ref (fun _ -> ())
+            ; moveInjector= ref (fun _ -> ()) } )
     | "AnnounceTimeLeft", InRound (room, round, inround) ->
         InRound
           ( room
@@ -331,6 +353,18 @@ end = struct
         AfterRound (room, round, {winner= None})
     | "EndGameWithTally", AfterRound (_, _, _) ->
         AfterGame (js |> JD.field "contents" (JD.array (JD.optional JD.string)))
+    | "RelayDrawingCmd", InRound (_, _, inround) -> (
+        let cmd = js |> JD.field "contents" JD.string in
+        let split = Js.String.split " " cmd in
+        match split.(0) with
+        | "M" ->
+            !(inround.moveInjector)
+              (float_of_string split.(1), float_of_string split.(2)) ;
+            st
+        | "E" ->
+            !(inround.endInjector) () ;
+            st
+        | _ -> Invalid )
     | _ -> Invalid
 
 
@@ -513,7 +547,17 @@ end = struct
                               ( match round.role with
                               | Guesser -> false
                               | Drawer -> true )
-                            [||]) |]
+                            ~moveCallback:(fun (ctxX, ctxY) ->
+                              sendServer ws "GotDrawingCmd"
+                                (Some
+                                   (Js.Json.string
+                                      ( "M " ^ string_of_float ctxX ^ " "
+                                      ^ string_of_float ctxY ))) )
+                            ~endCallback:(fun () ->
+                              sendServer ws "GotDrawingCmd"
+                                (Some (Js.Json.string "E")) )
+                            ~injectMoveCallback:inround.moveInjector
+                            ~injectEndCallback:inround.endInjector [||]) |]
                 ; match round.role with
                   | Drawer -> null
                   | Guesser ->
