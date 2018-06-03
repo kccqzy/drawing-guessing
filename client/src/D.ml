@@ -31,3 +31,5 @@ let input_ p = ReasonReact.createDomElement "input" ~props:(Obj.magic p)
 let canvas_ p = ReasonReact.createDomElement "canvas" ~props:(Obj.magic p)
 
 let strong_ p = ReasonReact.createDomElement "strong" ~props:(Obj.magic p)
+
+let hr_ p = ReasonReact.createDomElement "hr" ~props:(Obj.magic p)

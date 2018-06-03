@@ -34,6 +34,7 @@ data Msg
   | ReplyGuessIncorrect T.Text
   | EndRoundWithWinner T.Text
   | EndRoundWithoutWinner
+  | ToldNextRound
   | AnnounceTimeLeft Int
   | EndGameWithTally [Maybe T.Text]
   deriving (Show, Read)

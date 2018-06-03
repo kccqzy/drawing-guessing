@@ -28,3 +28,5 @@ val input_ : el
 val canvas_ : el
 
 val strong_ : el
+
+val hr_ : el

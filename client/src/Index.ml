@@ -14,26 +14,6 @@ type statelessComp =
 type ('s, 'a) reducerComp =
   ('s, 's, noRetainedProps, noRetainedProps, 'a) componentSpec
 
-(* Game logic follows. *)
-
-type gametype = NewGame of string | JoinGame of string * int
-
-type room = {rid: int; participants: string array}
-
-type role = Drawer | Guesser
-
-type round = {index: int; drawer: string; role: role}
-
-type inround =
-  {wordlength: int; word: string; secondsleft: int; currentGuess: string}
-
-type gamestate =
-  | Invalid
-  | WaitForRoomId
-  | WaitForGameStart of room
-  | WaitForRoundStart of room * round
-  | InRound of room * round * inround
-
 module Canvas : sig
   type state
 
@@ -68,6 +48,33 @@ end = struct
             [||] ) }
 end
 
+(* Game logic follows. *)
+
+type gametype = NewGame of string | JoinGame of string * int
+
+type room = {rid: int; participants: string array}
+
+type role = Drawer | Guesser
+
+type round = {index: int; drawer: string; role: role}
+
+type inround =
+  { wordlength: int
+  ; word: string
+  ; secondsleft: int
+  ; currentGuess: string
+  ; previousWrongGuess: string option }
+
+type afterround = {winner: string option}
+
+type gamestate =
+  | Invalid
+  | WaitForRoomId
+  | WaitForGameStart of room
+  | WaitForRoundStart of room * round
+  | InRound of room * round * inround
+  | AfterRound of room * round * afterround
+
 module Game : sig
   type state
 
@@ -85,7 +92,8 @@ end = struct
 
   type action =
     | SetConnectionState of connectionstate
-    | TransitionGameState of Js.Json.t
+    | TransitionGameStateByServer of Js.Json.t
+    | UpdateCurrentGuess of string
 
   let component = reducerComponent "Game"
 
@@ -104,7 +112,7 @@ end = struct
         WaitForGameStart
           { room with
             participants= js |> JD.field "contents" (JD.array JD.string) }
-    | "AnnounceRound", WaitForGameStart room ->
+    | "AnnounceRound", (WaitForGameStart room | AfterRound(room, _, _) ) ->
         WaitForRoundStart
           ( room
           , let index, drawer =
@@ -122,7 +130,8 @@ end = struct
             { word
             ; wordlength= String.length word
             ; secondsleft= 90
-            ; currentGuess= "" } )
+            ; currentGuess= ""
+            ; previousWrongGuess= None } )
     | "AnnounceWordLength", WaitForRoundStart (room, round)
       when round.role = Guesser ->
         InRound
@@ -132,12 +141,25 @@ end = struct
             { word= String.make wordlength '_'
             ; wordlength
             ; secondsleft= 90
-            ; currentGuess= "" } )
+            ; currentGuess= ""
+            ; previousWrongGuess= None } )
     | "AnnounceTimeLeft", InRound (room, round, inround) ->
         InRound
           ( room
           , round
           , {inround with secondsleft= js |> JD.field "contents" JD.int} )
+    | "ReplyGuessIncorrect", InRound (room, round, inround) ->
+        InRound
+          ( room
+          , round
+          , { inround with
+              previousWrongGuess= Some (js |> JD.field "contents" JD.string)
+            ; currentGuess= "" } )
+    | "EndRoundWithWinner", InRound (room, round, _) ->
+        AfterRound
+          (room, round, {winner= Some (js |> JD.field "contents" JD.string)})
+    | "EndRoundWithoutWinner", InRound (room, round, _) ->
+        AfterRound (room, round, {winner= None})
     | _ -> Invalid
 
 
@@ -151,6 +173,14 @@ end = struct
           ^ "&room_id=" ^ string_of_int rid
 
 
+  let sendServer ws tag contents =
+    let dict = Js.Dict.empty () in
+    Js.Dict.set dict "tag" (Js.Json.string tag) ;
+    (match contents with None -> () | Some c -> Js.Dict.set dict "contents" c) ;
+    let msg = Js.Json.stringify (Js.Json.object_ dict) in
+    WebSocket.sendString msg ws
+
+
   let make ~(gametype: gametype) _ =
     { component with
       initialState= (fun _ -> {conn= WillConnect; st= create gametype})
@@ -158,14 +188,28 @@ end = struct
         (fun action state ->
           match action with
           | SetConnectionState conn -> Update {state with conn}
-          | TransitionGameState json ->
-              Update {state with st= transition state.st json} )
+          | TransitionGameStateByServer json ->
+              Update {state with st= transition state.st json}
+          | UpdateCurrentGuess guess ->
+            match state.st with
+            | InRound (room, round, inround)
+              when String.length guess <= inround.wordlength ->
+                Update
+                  { state with
+                    st=
+                      InRound
+                        ( room
+                        , round
+                        , { inround with
+                            currentGuess= Js.String.toLowerCase guess } ) }
+            | _ -> NoUpdate )
     ; didMount=
         (fun self ->
           let ws = WebSocket.make (makeUrl gametype) in
           let handleMessage evt =
             self.send
-              (TransitionGameState (MessageEvent.data evt |> Json.parseOrRaise))
+              (TransitionGameStateByServer
+                 (MessageEvent.data evt |> Json.parseOrRaise))
           in
           let handleOpen _ = self.send (SetConnectionState (Connected ws)) in
           ws |> WebSocket.on @@ Open handleOpen
@@ -218,17 +262,12 @@ end = struct
                           (D.props ~type_:"button"
                              ~className:"btn btn-primary btn-lg btn-block"
                              ~onClick:(fun _ ->
-                               let dict = Js.Dict.empty () in
-                               Js.Dict.set dict "tag"
-                                 (Js.Json.string "ToldStartGame") ;
-                               Js.Dict.set dict "contents"
-                                 (Js.Json.number
-                                    (float_of_int
-                                       (2 * Array.length room.participants))) ;
-                               let msg =
-                                 Js.Json.stringify (Js.Json.object_ dict)
-                               in
-                               WebSocket.sendString msg ws )
+                               sendServer ws "ToldStartGame"
+                                 (Some
+                                    (Js.Json.number
+                                       (float_of_int
+                                          (2 * Array.length room.participants))))
+                               )
                              ())
                           [|string "Start Game Now"|]
                     | _ -> null |]
@@ -250,19 +289,15 @@ end = struct
                           (D.props ~type_:"button"
                              ~className:"btn btn-primary btn-lg btn-block"
                              ~onClick:(fun _ ->
-                               let dict = Js.Dict.empty () in
-                               Js.Dict.set dict "tag"
-                                 (Js.Json.string "ToldStartRound") ;
-                               let msg =
-                                 Js.Json.stringify (Js.Json.object_ dict)
-                               in
-                               WebSocket.sendString msg ws )
+                               sendServer ws "ToldStartRound" None )
                              ())
                           [|string "Ready To Draw!"|] |]
             | InRound (_, round, inround) ->
                 D.div_ (D.props ())
                   [| D.h2_ (D.props ())
-                       [|string ("Round " ^ string_of_int (round.index + 1))|]
+                       [| string "Round "
+                       ; D.strong_ (D.props ())
+                           [|string (string_of_int (round.index + 1))|] |]
                   ; D.div_
                       (D.props
                          ~className:
@@ -292,20 +327,72 @@ end = struct
                   ; match round.role with
                     | Drawer -> null
                     | Guesser ->
-                        D.div_
-                          (D.props ~className:"input-group" ())
-                          [| D.input_
-                               (D.props ~type_:"text" ~className:"form-control"
-                                  ~value:inround.currentGuess
-                                  ~placeholder:"Type a guess here" ())
-                               [||]
+                        let previousGuessFeedback =
+                          match inround.previousWrongGuess with
+                          | None -> null
+                          | Some wrong ->
+                              D.div_
+                                (D.props ~className:"alert alert-danger" ())
+                                [|string {j|"$wrong" is wrong. Try Again.|j}|]
+                        in
+                        D.div_ (D.props ())
+                          [| previousGuessFeedback
                           ; D.div_
-                              (D.props ~className:"input-group-append" ())
-                              [| D.button_
-                                   (D.props
-                                      ~className:"btn btn-outline-secondary"
-                                      ~type_:"button" ())
-                                   [|string "Guess!"|] |] |] |] ) }
+                              (D.props ~className:"input-group" ())
+                              [| D.input_
+                                   (D.props ~type_:"text"
+                                      ~className:"form-control"
+                                      ~value:inround.currentGuess
+                                      ~style:
+                                        (D.Style.make
+                                           ~textTransform:"uppercase" ())
+                                      ~onChange:(fun e ->
+                                        self.send
+                                          (UpdateCurrentGuess (D.targetVal e))
+                                        )
+                                      ~placeholder:"Type a guess here" ())
+                                   [||]
+                              ; D.div_
+                                  (D.props ~className:"input-group-append" ())
+                                  [| D.button_
+                                       (D.props
+                                          ~disabled:
+                                            ( String.length inround.currentGuess
+                                            != inround.wordlength )
+                                          ~className:"btn btn-primary"
+                                          ~onClick:(fun _ ->
+                                            sendServer ws "GotGuess"
+                                              (Some
+                                                 (Js.Json.string
+                                                    inround.currentGuess)) )
+                                          ~type_:"button" ())
+                                       [|string "Guess!"|] |] |] |] |]
+            | AfterRound (_, round, afterround) ->
+                D.div_ (D.props ())
+                  [| D.h1_
+                       (D.props ~className:"display-4" ())
+                       [| match afterround.winner with
+                          | None -> string "No one guessed correctly :("
+                          | Some w -> string {j|Congrats, $w!|j} |]
+                  ; D.p_
+                      (D.props ~className:"lead" ())
+                      [| string
+                           ( "Round " ^ string_of_int (round.index + 1)
+                           ^ " just ended." ) |]
+                  ; D.hr_ (D.props ~className:"my-4" ()) [||]
+                  ; D.p_ (D.props ())
+                      [| string
+                           "Catch a breath, reflect on the experience, and maybe move on!"
+                      |]
+                  ; match round.role with
+                    | Guesser -> null
+                    | Drawer ->
+                        D.button_
+                          (D.props
+                             ~onClick:(fun _ ->
+                               sendServer ws "ToldNextRound" None )
+                             ~className:"btn btn-primary btn-lg" ())
+                          [|string "Continue"|] |] ) }
 end
 
 module Page : sig

@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE StrictData #-}
@@ -203,8 +204,7 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
     broadcast (AnnounceRound roundNo drawerName)
     sendTextData drawerConn TellMayStartRound
     let wd = wordlist V.! (roundNo `mod` V.length wordlist)
-    ss <- atomically (readTQueue drawerQueue)
-    case ss of
+    atomically (readTQueue drawerQueue) >>= \case
       ToldStartRound -> pure ()
       _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
@@ -248,6 +248,9 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
     case r of
       Left _ -> broadcast EndRoundWithoutWinner
       Right w -> broadcast (EndRoundWithWinner w)
+    atomically (readTQueue drawerQueue) >>= \case
+      ToldNextRound -> pure ()
+      _ -> throwIO (ErrorCall "Malicious client: State violation.")
     forM_ clients' $ \(_, queue, _, _) -> atomically (void (flushTQueue queue))
     case r of
       Left _ -> pure Nothing
