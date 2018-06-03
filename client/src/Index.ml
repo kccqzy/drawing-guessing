@@ -21,29 +21,197 @@ module Canvas : sig
 
   val make : editable:bool -> 'a -> (state, action) reducerComp
 end = struct
-  type state = {canvasRef: Dom.element option ref}
+  open Canvas2dRe
+
+  type canvasState =
+    { canvas: Dom.element
+    ; ctx: Canvas2dRe.t
+    ; clientWidth: float
+    ; clientHeight: float
+    ; scaleFactor: float
+    ; currentStroke: (float * float) array ref
+    ; currentStrokeHasDrawn: bool ref
+    ; hasDrawn: bool ref
+    ; inStroke: bool ref }
+
+  exception NothingToDraw
+
+  let setupEventListeners canvasst =
+    let offsetX =
+      float_of_int
+        (HtmlElementRe.offsetLeft
+           (ElementRe.unsafeAsHtmlElement canvasst.canvas))
+    in
+    let offsetY =
+      float_of_int
+        (HtmlElementRe.offsetTop
+           (ElementRe.unsafeAsHtmlElement canvasst.canvas))
+    in
+    let pushCurrentStroke touchPageX touchPageY =
+      let ctxX = (touchPageX -. offsetX) *. canvasst.scaleFactor in
+      let ctxY = (touchPageY -. offsetY) *. canvasst.scaleFactor in
+      ignore @@ Js.Array.push (ctxX, ctxY) !(canvasst.currentStroke)
+    in
+    let immediateStroke strokeWillEnd =
+      let ipps = 8 in
+      canvasst.hasDrawn := true ;
+      let (fstStrokeX, fstStrokeY) as fstStroke =
+        !(canvasst.currentStroke).(0)
+      in
+      if not !(canvasst.inStroke) then (
+        (* If this is the first part of a stroke; move to the desired location and etc. *)
+        ignore (Js.Array.push fstStroke !(canvasst.currentStroke)) ;
+        moveTo ~x:fstStrokeX ~y:fstStrokeY canvasst.ctx ;
+        beginPath canvasst.ctx ;
+        canvasst.inStroke := true )
+      else () ;
+      if strokeWillEnd then (
+        (* If this is the last part of a stroke, duplicate the location for interpolation. *)
+        ignore
+        @@ Js.Array.push
+             !(canvasst.currentStroke).(Array.length !(canvasst.currentStroke)
+                                        - 1)
+             !(canvasst.currentStroke) ;
+        () )
+      else () ;
+      (* Not enough strokes. It could be due to a single-point stroke for example. *)
+      let isCurrentStrokeTooShort =
+        Js.Array.length !(canvasst.currentStroke) < 4
+      in
+      try
+        if isCurrentStrokeTooShort then
+          if not strokeWillEnd then raise NothingToDraw
+          else if not !(canvasst.currentStrokeHasDrawn) then (
+            arc ~x:fstStrokeX ~y:fstStrokeY
+              ~r:(3.0 *. canvasst.scaleFactor)
+              ~startAngle:0.0 ~endAngle:(2.0 *. 3.141592653589793)
+              ~anticw:false canvasst.ctx ;
+            fill canvasst.ctx )
+          else ()
+        else (
+          for i = 0 to Array.length !(canvasst.currentStroke) - 4 do
+            let window =
+              Js.Array.slice ~start:i ~end_:(i + 4) !(canvasst.currentStroke)
+            in
+            lineTo ~x:(fst window.(1)) ~y:(snd window.(1)) canvasst.ctx ;
+            for j = 1 to ipps - 1 do
+              let t = float_of_int j /. float_of_int ipps in
+              let interpolate f =
+                0.5
+                *. ( 2.0 *. f window.(1)
+                   +. (~-. (f window.(0)) +. f window.(2)) *. t
+                   +. ( 2.0 *. f window.(0) -. 5.0 *. f window.(1)
+                      +. 4.0 *. f window.(2) -. f window.(3) )
+                      *. t *. t
+                   +. ( ~-. (f window.(0)) +. 3.0 *. f window.(1)
+                      -. 3.0 *. f window.(2) +. f window.(3) )
+                      *. t *. t *. t )
+              in
+              lineTo ~x:(interpolate fst) ~y:(interpolate snd) canvasst.ctx
+            done ;
+            lineTo ~x:(fst window.(2)) ~y:(snd window.(2)) canvasst.ctx
+          done ;
+          stroke canvasst.ctx ;
+          beginPath canvasst.ctx ;
+          canvasst.currentStrokeHasDrawn := true ;
+          if strokeWillEnd then (
+            closePath canvasst.ctx ;
+            canvasst.currentStroke := [||] ;
+            canvasst.inStroke := false ;
+            canvasst.currentStrokeHasDrawn := true )
+          else
+            canvasst.currentStroke
+            := Js.Array.sliceFrom (-3) !(canvasst.currentStroke) )
+      with NothingToDraw -> ()
+    in
+    let getPageX =
+      [%raw {| function(e){ return +e.nativeEvent.touches[0].pageX; }  |}]
+    in
+    let getPageY =
+      [%raw {| function(e){ return +e.nativeEvent.touches[0].pageY; }  |}]
+    in
+    let touchStartOrMoveHandler e =
+      let pageX = getPageX e in
+      let pageY = getPageY e in
+      ReactEventRe.Synthetic.preventDefault e ;
+      Webapi.requestAnimationFrame (fun _ ->
+          pushCurrentStroke pageX pageY ;
+          immediateStroke false )
+    in
+    let touchEndHandler e =
+      ReactEventRe.Synthetic.preventDefault e ;
+      Js.log "Gotten touchend event" ;
+      Webapi.requestAnimationFrame (fun _ -> immediateStroke true)
+    in
+    (touchStartOrMoveHandler, touchEndHandler)
+
+
+  let create canvas =
+    let ctx = CanvasRe.CanvasElement.getContext2d canvas in
+    let clientWidth = float_of_int (ElementRe.clientWidth canvas) in
+    let scaleFactor =
+      ( match ElementRe.getAttribute "width" canvas with
+      | None ->
+          Js.log "unable to get canvas width, assuming 1600" ;
+          1600.0
+      | Some w -> float_of_string w )
+      /. clientWidth
+    in
+    Js.log scaleFactor ;
+    lineCap ctx LineCap.round ;
+    lineWidth ctx (3.0 *. scaleFactor) ;
+    { canvas
+    ; ctx
+    ; clientWidth
+    ; clientHeight= float_of_int (ElementRe.clientHeight canvas)
+    ; scaleFactor
+    ; currentStroke= ref [||]
+    ; currentStrokeHasDrawn= ref false
+    ; hasDrawn= ref false
+    ; inStroke= ref false }
+
+
+  type state = {canvasRef: canvasState option ref; updateCount: int ref}
 
   type action = unit
 
   let component = reducerComponent "Canvas"
 
-  let make ~(editable: bool) _ =
+  (* Note: this component doesn't allow changing props. *)
+  let make ~editable _ =
     { component with
-      initialState= (fun _ -> {canvasRef= ref None})
+      initialState= (fun _ -> {canvasRef= ref None; updateCount= ref 0})
     ; reducer= (fun () _ -> NoUpdate)
+    ; shouldUpdate= (fun s -> !(s.oldSelf.state.updateCount) < 2)
     ; render=
         (fun self ->
+          Js.log "calling renderer for Canvas; dumping current state" ;
+          Js.log self.state ;
+          let handlers =
+            match !(self.state.canvasRef) with
+            | Some canvasSt when editable ->
+                Js.log "will now set up event handlers" ;
+                setupEventListeners canvasSt
+            | _ -> ((fun _ -> ()), fun _ -> ())
+          in
           D.canvas_
             (D.props
                ~ref:
                  (self.handle (fun theRef {state} ->
-                      state.canvasRef := Js.Nullable.toOption theRef ;
-                      Js.log "Gotten DOM ref from react for canvas:" ;
-                      Js.log theRef ))
+                      let r = Js.Nullable.toOption theRef in
+                      state.canvasRef := Belt.Option.map r create ;
+                      state.updateCount := !(state.updateCount) + 1 ))
+               ~onTouchStart:(fst handlers) ~onTouchMove:(fst handlers)
+               ~onTouchEnd:(snd handlers)
                ~style:
                  (D.Style.make ~width:"calc(100vw - 30px)"
-                    ~height:"calc(100vw - 30px)" ~backgroundColor:"#e6f1fe"
-                    ~borderRadius:"4px" ())
+                    ~height:"calc((100vw - 30px) / 1.6 )"
+                    ~backgroundColor:"#e6f1fe" ~borderRadius:"4px" ())
+               ~width:"1600" ~height:"1000"
+               (* Note that the most suitable width/height is actually
+                  canvas.clientWidth * window.devicePixelRatio, but we need this
+                  to be device independent so we arbitrary choose 1600:1000 as a
+                  good value. Indeed. *)
                ())
             [||] ) }
 end
