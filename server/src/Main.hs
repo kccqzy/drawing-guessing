@@ -254,9 +254,9 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
     case r of
       Left _ -> pure Nothing
       Right w -> pure (Just w)
-  atomically $ modifyTVar' st (IM.delete rid)
   broadcast (EndGameWithTally (toList result))
   forConcurrently_ clients' $ \(_, _, receiver, conn) -> do
     sendClose conn ("Goodbye!" :: T.Text)
     threadDelay 2000000
     cancel receiver
+  atomically $ modifyTVar' st (IM.delete rid)
