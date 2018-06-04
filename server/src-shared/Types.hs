@@ -1,5 +1,6 @@
+{-# LANGUAGE StrictData #-}
 {-# LANGUAGE TemplateHaskell #-}
-module Types where
+module Types (Msg(..))where
 
 import Data.Aeson
 import Data.Aeson.TH (defaultOptions, deriveJSON)

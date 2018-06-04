@@ -15,6 +15,7 @@ import Control.Monad
 import Data.Foldable
 import qualified Data.IntMap.Strict as IM
 import qualified Data.List as List
+import Data.Maybe
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8)
 import qualified Data.Vector as V
@@ -204,12 +205,16 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
   let broadcastTo who msg = atomically $ forM_ who $ \ClientConn{sendQueue} -> writeTQueue sendQueue msg
       broadcast = broadcastTo clients'
 
-  let clientsV = V.fromList (IM.toList clients')
-  shuffledClients <-
-        let (q, r) = rounds `quotRem` V.length clientsV in
-          uniformShuffle (V.concat (V.take r clientsV : List.replicate q clientsV)) rng
+  let clients'' = zip [0..] (take rounds (cycle (IM.toList clients')))
 
-  result <- flip V.imapM shuffledClients $ \roundNo (drawerIndex, drawer) -> do
+  result <- forM clients'' $ \(roundNo, (drawerIndex, drawer)) -> do
+   -- Is this drawer dead? If so, skip him.
+   isDead <- atomically $ do
+     receiverResult <- pollSTM (receiver drawer)
+     senderResult <- pollSTM (sender drawer)
+     -- We consider this client dead if either the receiver or sender is dead.
+     pure (isJust receiverResult || isJust senderResult)
+   if isDead then pure Nothing else do
     let guessers = IM.delete drawerIndex clients'
         broadcastGuessers = broadcastTo guessers
         sendDrawer = atomically . writeTQueue (sendQueue drawer)

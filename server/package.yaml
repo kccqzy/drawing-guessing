@@ -4,10 +4,12 @@ category:            Web
 
 library:
   source-dirs: src-shared
+  ghc-options: -Wall
   dependencies:
     - aeson
     - base
     - containers
+    - stm
     - text
     - vector
     - websockets
@@ -16,7 +18,7 @@ executables:
   dg-server:
     main: Main.hs
     source-dirs: src
-    ghc-options: -threaded -rtsopts "-with-rtsopts=-N -I0"
+    ghc-options: -Wall -threaded -rtsopts "-with-rtsopts=-N -I0"
     dependencies:
       - async
       - base
@@ -38,7 +40,7 @@ executables:
   dg-client:
     main: Main.hs
     source-dirs: src-testclient
-    ghc-options: -threaded -rtsopts "-with-rtsopts=-N -I0"
+    ghc-options: -Wall -threaded -rtsopts "-with-rtsopts=-N -I0"
     dependencies:
       - async
       - base
