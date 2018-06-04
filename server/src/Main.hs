@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE StrictData #-}
@@ -172,6 +173,15 @@ joinRoom =
 raceSTM :: STM a -> STM b -> STM (Either a b)
 raceSTM a b = (Left <$> a) `orElse` (Right <$> b)
 
+data ClientConn = ClientConn
+  { receiveQueue :: TQueue Msg
+  , receiver :: Async ()
+  , sendQueue :: TQueue Msg
+  , sender :: Async ()
+  , conn :: Connection
+  , name :: T.Text
+  }
+
 beginGame :: TVar ServerState -> Int -> Int -> IO ()
 beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
   clients <- (rClients . (IM.! rid)) <$> readTVarIO st
@@ -187,9 +197,11 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
   clients' <- forM clients $ \(Client name conn) -> do
     receiveQueue <- newTQueueIO
     receiver <- async $ forever $ receiveData conn >>= atomically . writeTQueue receiveQueue
-    pure (name, receiveQueue, receiver, conn)
+    sendQueue <- newTQueueIO
+    sender <- async $ forever $ atomically (readTQueue sendQueue) >>= sendTextData conn
+    pure ClientConn{..}
 
-  let broadcastTo who msg = forM_ who $ \(_, _, _, conn) ->  sendTextData conn msg
+  let broadcastTo who msg = atomically $ forM_ who $ \ClientConn{sendQueue} -> writeTQueue sendQueue msg
       broadcast = broadcastTo clients'
 
   let clientsV = V.fromList (IM.toList clients')
@@ -197,18 +209,19 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
         let (q, r) = rounds `quotRem` V.length clientsV in
           uniformShuffle (V.concat (V.take r clientsV : List.replicate q clientsV)) rng
 
-  result <- flip V.imapM shuffledClients $ \roundNo (drawerIndex, (drawerName, drawerQueue, _, drawerConn)) -> do
+  result <- flip V.imapM shuffledClients $ \roundNo (drawerIndex, drawer) -> do
     let guessers = IM.delete drawerIndex clients'
         broadcastGuessers = broadcastTo guessers
+        sendDrawer = atomically . writeTQueue (sendQueue drawer)
 
-    broadcast (AnnounceRound roundNo drawerName)
-    sendTextData drawerConn TellMayStartRound
+    broadcast (AnnounceRound roundNo (name drawer))
+    sendDrawer TellMayStartRound
     let wd = wordlist V.! (roundNo `mod` V.length wordlist)
-    atomically (readTQueue drawerQueue) >>= \case
+    atomically (readTQueue (receiveQueue drawer)) >>= \case
       ToldStartRound -> pure ()
       _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
-    sendTextData drawerConn (TellDrawerWord wd)
+    sendDrawer (TellDrawerWord wd)
     broadcastGuessers (AnnounceWordLength (T.length wd))
 
     let timerThread =
@@ -219,43 +232,39 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
     r <- race timerThread $ do
       -- Within the time limit of 90 seconds, we either try to receive a drawing
       -- command from the drawer or a guess from the guessers.
-      drawingChan <- newBroadcastTChanIO
       winner <- newEmptyTMVarIO
 
-      let drawerThread conn = do
-            d <- atomically (raceSTM (readTQueue drawerQueue) (readTMVar winner))
+      let drawerThread = do
+            d <- atomically (raceSTM (readTQueue (receiveQueue drawer)) (readTMVar winner))
             case d of
               Right _ -> pure ()
-              Left (GotDrawingCmd t) -> atomically (writeTChan drawingChan t) >> drawerThread conn
+              Left (GotDrawingCmd t) -> broadcastGuessers (RelayDrawingCmd t) >> drawerThread
               _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
-          guesserThread name readQueue conn = do
-            chan <- atomically $ dupTChan drawingChan
-            -- A triple race between: (a) winner found, (b) got message from the drawing chan, (c) got message from the read queue
+          guesserThread ClientConn{..} = do
             let loop =
-                  atomically (raceSTM (raceSTM (readTQueue readQueue) (readTChan chan)) (readTMVar winner)) >>= \case
+                  atomically (raceSTM (readTQueue receiveQueue) (readTMVar winner)) >>= \case
                     Right _ -> pure ()
-                    Left (Right t) -> sendTextData conn (RelayDrawingCmd t) >> loop
-                    Left (Left (GotGuess w)) | w == wd -> atomically (putTMVar winner name)
-                                             | otherwise -> sendTextData conn (ReplyGuessIncorrect w) >> loop
+                    Left (GotGuess w) | w == wd -> atomically (putTMVar winner name)
+                                      | otherwise -> atomically (writeTQueue sendQueue (ReplyGuessIncorrect w)) >> loop
                     _ -> throwIO (ErrorCall "Malicious client: State violation.")
             loop
-          actions =
-            drawerThread drawerConn : map (\(name, readQueue, _, conn) -> guesserThread name readQueue conn) (IM.elems guessers)
+          actions = drawerThread : map guesserThread (IM.elems guessers)
 
       mapConcurrently_ id actions
       atomically (readTMVar winner)
     case r of
       Left _ -> broadcast EndRoundWithoutWinner
       Right w -> broadcast (EndRoundWithWinner w)
-    atomically (readTQueue drawerQueue) >>= \case
+    atomically (readTQueue (receiveQueue drawer)) >>= \case
       ToldNextRound -> pure ()
       _ -> throwIO (ErrorCall "Malicious client: State violation.")
     case r of
       Left _ -> pure Nothing
       Right w -> pure (Just w)
   broadcast (EndGameWithTally (toList result))
-  forConcurrently_ clients' $ \(_, _, receiver, conn) -> do
+  forConcurrently_ clients' $ \ClientConn{..} -> do
+    cancel sender
     sendClose conn ("Goodbye!" :: T.Text)
     threadDelay 2000000
     cancel receiver
