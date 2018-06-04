@@ -59,6 +59,23 @@ end = struct
 
   exception NothingToDraw
 
+  let iterWindowed n arr f =
+    let len = Js.Array.length arr in
+    let rec go i =
+      f (Js.Array.slice ~start:i ~end_:(i + n) arr) ;
+      if i < len - n then go (i + 1) else ()
+    in
+    go 0
+
+
+  let iterRange whence whither f =
+    let rec go i =
+      f i ;
+      if i < whither then go (i + 1) else ()
+    in
+    go whence
+
+
   let setupEventListeners canvasst sendDrawingCmd =
     let offsetX =
       float_of_int
@@ -111,28 +128,24 @@ end = struct
             fill canvasst.ctx )
           else ()
         else (
-          for i = 0 to Array.length canvasst.currentStroke - 4 do
-            let window =
-              Js.Array.slice ~start:i ~end_:(i + 4) canvasst.currentStroke
-            in
-            lineTo ~x:(fst window.(1)) ~y:(snd window.(1)) canvasst.ctx ;
-            for j = 1 to ipps - 1 do
-              let t = float_of_int j /. float_of_int ipps in
-              let interpolate f =
-                0.5
-                *. ( 2.0 *. f window.(1)
-                   +. (~-. (f window.(0)) +. f window.(2)) *. t
-                   +. ( 2.0 *. f window.(0) -. 5.0 *. f window.(1)
-                      +. 4.0 *. f window.(2) -. f window.(3) )
-                      *. t *. t
-                   +. ( ~-. (f window.(0)) +. 3.0 *. f window.(1)
-                      -. 3.0 *. f window.(2) +. f window.(3) )
-                      *. t *. t *. t )
-              in
-              lineTo ~x:(interpolate fst) ~y:(interpolate snd) canvasst.ctx
-            done ;
-            lineTo ~x:(fst window.(2)) ~y:(snd window.(2)) canvasst.ctx
-          done ;
+          iterWindowed 4 canvasst.currentStroke (fun window ->
+              lineTo ~x:(fst window.(1)) ~y:(snd window.(1)) canvasst.ctx ;
+              iterRange 1 (ipps - 1) (fun j ->
+                  let interpolate f =
+                    let t = float_of_int j /. float_of_int ipps in
+                    0.5
+                    *. ( 2.0 *. f window.(1)
+                       +. (~-. (f window.(0)) +. f window.(2)) *. t
+                       +. ( 2.0 *. f window.(0) -. 5.0 *. f window.(1)
+                          +. 4.0 *. f window.(2) -. f window.(3) )
+                          *. t *. t
+                       +. ( ~-. (f window.(0)) +. 3.0 *. f window.(1)
+                          -. 3.0 *. f window.(2) +. f window.(3) )
+                          *. t *. t *. t )
+                  in
+                  lineTo ~x:(interpolate fst) ~y:(interpolate snd) canvasst.ctx
+              ) ;
+              lineTo ~x:(fst window.(2)) ~y:(snd window.(2)) canvasst.ctx ) ;
           stroke canvasst.ctx ;
           beginPath canvasst.ctx ;
           canvasst.currentStrokeHasDrawn := true ;
