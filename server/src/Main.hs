@@ -207,13 +207,16 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
 
   let clients'' = zip [0..] (take rounds (cycle (IM.toList clients')))
 
+  let isClientDead cc = do
+        receiverResult <- pollSTM (receiver cc)
+        senderResult <- pollSTM (sender cc)
+        -- We consider this client dead if either the receiver or sender is dead.
+        pure (isJust receiverResult || isJust senderResult)
+
+
   result <- forM clients'' $ \(roundNo, (drawerIndex, drawer)) -> do
    -- Is this drawer dead? If so, skip him.
-   isDead <- atomically $ do
-     receiverResult <- pollSTM (receiver drawer)
-     senderResult <- pollSTM (sender drawer)
-     -- We consider this client dead if either the receiver or sender is dead.
-     pure (isJust receiverResult || isJust senderResult)
+   isDead <- atomically $ isClientDead drawer
    if isDead then pure Nothing else do
     let guessers = IM.delete drawerIndex clients'
         broadcastGuessers = broadcastTo guessers
@@ -268,9 +271,25 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
       Left _ -> pure Nothing
       Right w -> pure (Just w)
   broadcast (EndGameWithTally (toList result))
-  forConcurrently_ clients' $ \ClientConn{..} -> do
+
+  forConcurrently_ clients' $ \cc@ClientConn{..} -> do
+  -- There is no guarantee that right after the broadcast attempt, the sender
+  -- threads have a chance to actually send it out. Therefore we wait. We first
+  -- wait for the sender to finish taking the item from the queue. Of course
+  -- there is also no guarantee that there won't be a context switch to our
+  -- thread right before the sender actually sends it. We hope for the best use
+  -- a threadDelay. TODO in the future when we build a full ACK infrastructure
+  -- on top of WebSocket, we can simply check the ACK number before killing the
+  -- sender.
+    atomically $ do
+      isDead <- isClientDead cc
+      isSenderQueueEmpty <- isEmptyTQueue sendQueue
+      if isDead || isSenderQueueEmpty then pure () else retry
+    threadDelay 1000000
     cancel sender
-    sendClose conn ("Goodbye!" :: T.Text)
     threadDelay 2000000
+    closer <- async $ sendClose conn ("Goodbye!" :: T.Text)
+    threadDelay 4000000
     cancel receiver
+    cancel closer
   atomically $ modifyTVar' st (IM.delete rid)
