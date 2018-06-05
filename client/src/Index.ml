@@ -172,11 +172,13 @@ end = struct
         (Js.Array.from (Obj.magic (ReactEventRe.Touch.touches e))).(0) ## pageY
       in
       ReactEventRe.Synthetic.preventDefault e ;
+      ReactEventRe.Synthetic.stopPropagation e ;
       pushCurrentStroke pageX pageY ;
       Webapi.requestAnimationFrame (fun _ -> immediateStroke false)
     in
     let touchEndHandler e =
       ReactEventRe.Synthetic.preventDefault e ;
+      ReactEventRe.Synthetic.stopPropagation e ;
       sendDrawingCmd DrawingCmd.E ;
       Webapi.requestAnimationFrame (fun _ -> immediateStroke true)
     in
@@ -299,6 +301,7 @@ let print_gamestate = function
   | AfterRound (_, _, _) -> "AfterRound"
   | AfterGame _ -> "AfterGame"
   | Invalid _ -> "Invalid"
+
 
 let atoi s = try Some (int_of_string s) with Failure _ -> None
 
