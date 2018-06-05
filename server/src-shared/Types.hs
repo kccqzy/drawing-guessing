@@ -17,8 +17,8 @@ import Network.WebSockets
 -- reply with 'ToldStartRound', upon which the round begins and the clock
 -- starts. The drawer can send 'GotDrawingCmd' upon whose receipt
 -- 'RelayDrawingCmd' is sent. The guessers can send 'GotGuess' and the server
--- will either reply this client with 'ReplyGuessIncorrect' or reply everyone
--- with 'EndRoundWithWinner'.
+-- will either reply this client with 'ReplyGuessIncorrect' or with
+-- 'EndRound'.
 data Msg
   = TellRoomId Int
   | AnnouncePlayers [T.Text]
@@ -33,11 +33,12 @@ data Msg
   | RelayDrawingCmd T.Text
   | GotGuess T.Text
   | ReplyGuessIncorrect T.Text
-  | EndRoundWithWinner T.Text
-  | EndRoundWithoutWinner
+  | ReplyGuessCorrect
+  | EndRound
   | ToldNextRound
   | AnnounceTimeLeft Int
-  | EndGameWithTally [Maybe T.Text]
+  | AnnounceScores [(T.Text, Int)]
+  | EndGame
   deriving (Show, Read)
 
 $(deriveJSON defaultOptions ''Msg)

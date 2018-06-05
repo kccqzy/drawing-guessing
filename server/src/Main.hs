@@ -3,6 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE StrictData #-}
+{-# LANGUAGE TupleSections #-}
 module Main
   ( main
   ) where
@@ -16,6 +17,7 @@ import Data.Foldable
 import qualified Data.IntMap.Strict as IM
 import qualified Data.List as List
 import Data.Maybe
+import Data.Ord
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8)
 import qualified Data.Vector as V
@@ -181,6 +183,7 @@ data ClientConn = ClientConn
   , sender :: Async ()
   , conn :: Connection
   , name :: T.Text
+  , currentScore :: TVar Int
   }
 
 revealLetter :: T.Text -> T.Text -> Int -> T.Text
@@ -190,6 +193,9 @@ revealLetter masked orig i = T.pack (zipWith3 selecting (T.unpack masked) (T.unp
     selecting a b j
       | i == j = b
       | otherwise = a
+
+allM :: (Foldable t, Monad m) => (a -> m Bool) -> t a -> m Bool
+allM predicate = foldrM (\a b -> if b then predicate a else pure False) True
 
 beginGame :: TVar ServerState -> Int -> Int -> IO ()
 beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
@@ -208,6 +214,7 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
     receiver <- async $ forever $ receiveData conn >>= atomically . writeTQueue receiveQueue
     sendQueue <- newTQueueIO
     sender <- async $ forever $ atomically (readTQueue sendQueue) >>= sendTextData conn
+    currentScore <- newTVarIO 0
     pure ClientConn{..}
 
   let broadcastTo who msg = atomically $ forM_ who $ \ClientConn{sendQueue} -> writeTQueue sendQueue msg
@@ -221,16 +228,21 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
         -- We consider this client dead if either the receiver or sender is dead.
         pure (isJust receiverResult || isJust senderResult)
 
+  let makeTallySTM = fmap (List.sortBy (flip (comparing snd)). IM.elems) $ forM clients' $ \ClientConn{..} -> do
+        s <- readTVar currentScore
+        pure (name, s)
+      makeTally = atomically makeTallySTM
 
-  result <- forM clients'' $ \(roundNo, (drawerIndex, drawer)) -> do
+  forM_ clients'' $ \(roundNo, (drawerIndex, drawer)) -> do
    -- Is this drawer dead? If so, skip him.
    isDead <- atomically $ isClientDead drawer
-   if isDead then pure Nothing else do
+   if isDead then pure () else do
     let guessers = IM.delete drawerIndex clients'
         broadcastGuessers = broadcastTo guessers
         sendDrawer = atomically . writeTQueue (sendQueue drawer)
 
     broadcast (AnnounceRound roundNo (name drawer))
+    makeTally >>= broadcast . AnnounceScores
     sendDrawer TellMayStartRound
     let wd = wordlist V.! (roundNo `mod` V.length wordlist)
     atomically (readTQueue (receiveQueue drawer)) >>= \case
@@ -262,40 +274,54 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
             threadDelay 1000000
             broadcast (AnnounceTimeLeft seconds)
 
-    r <- race timerThread $ do
-      -- Within the time limit of 90 seconds, we either try to receive a drawing
-      -- command from the drawer or a guess from the guessers.
-      winner <- newEmptyTMVarIO
+    guessers' <- forM guessers $ \guesser -> (,) guesser <$> newTVarIO False
+
+    let drawerDeadOrAllGuessersGuessedCorrectlyOrDead = do
+          dd <- isClientDead drawer
+          if dd then pure () else do
+            r <- flip allM guessers' $ \(cc, hasGuessedCorrectly) ->
+              (||) <$> isClientDead cc <*> readTVar hasGuessedCorrectly
+            if r then pure () else retry
+
+        assignPointsForCurrentWin =
+          foldrM (\(_, correctly) prop -> do
+                     c <- readTVar correctly
+                     pure $ if c then max 1 (prop - 1) else prop
+                    ) 3 guessers'
+
+    race_ timerThread $ do
 
       let drawerThread = do
-            d <- atomically (raceSTM (readTQueue (receiveQueue drawer)) (readTMVar winner))
+            d <- atomically (raceSTM (readTQueue (receiveQueue drawer)) drawerDeadOrAllGuessersGuessedCorrectlyOrDead)
             case d of
               Right _ -> pure ()
               Left (GotDrawingCmd t) -> broadcastGuessers (RelayDrawingCmd t) >> drawerThread
               _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
-          guesserThread ClientConn{..} = do
+          guesserThread (ClientConn{..}, guessedCorrectly) = do
             let loop =
-                  atomically (raceSTM (readTQueue receiveQueue) (readTMVar winner)) >>= \case
+                  atomically (raceSTM (readTQueue receiveQueue) drawerDeadOrAllGuessersGuessedCorrectlyOrDead) >>= \case
                     Right _ -> pure ()
-                    Left (GotGuess w) | w == wd -> atomically (putTMVar winner name)
+                    Left (GotGuess w) | w == wd ->
+                                          atomically $ do
+                                            pointsAwarded <- assignPointsForCurrentWin
+                                            writeTVar guessedCorrectly True
+                                            modifyTVar' currentScore (pointsAwarded +)
+                                            writeTQueue sendQueue ReplyGuessCorrect
+                                            tally <- makeTallySTM
+                                            forM_ clients' $ \ClientConn{sendQueue=sq} -> writeTQueue sq (AnnounceScores tally)
                                       | otherwise -> atomically (writeTQueue sendQueue (ReplyGuessIncorrect w)) >> loop
                     _ -> throwIO (ErrorCall "Malicious client: State violation.")
             loop
-          actions = drawerThread : map guesserThread (IM.elems guessers)
+          actions = drawerThread : map guesserThread (IM.elems guessers')
 
       mapConcurrently_ id actions
-      atomically (readTMVar winner)
-    case r of
-      Left _ -> broadcast EndRoundWithoutWinner
-      Right w -> broadcast (EndRoundWithWinner w)
+    broadcast EndRound
     atomically (readTQueue (receiveQueue drawer)) >>= \case
       ToldNextRound -> pure ()
       _ -> throwIO (ErrorCall "Malicious client: State violation.")
-    case r of
-      Left _ -> pure Nothing
-      Right w -> pure (Just w)
-  broadcast (EndGameWithTally (toList result))
+  makeTally >>= broadcast . AnnounceScores
+  broadcast EndGame
 
   forConcurrently_ clients' $ \cc@ClientConn{..} -> do
   -- There is no guarantee that right after the broadcast attempt, the sender

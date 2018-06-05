@@ -267,6 +267,8 @@ type gametype = NewGame of string | JoinGame of string * int
 
 type room = {rid: int; participants: string array; specifiedRounds: int option}
 
+type highscores = (string * int) array
+
 type role = Drawer | Guesser
 
 type round = {index: int; drawer: string; role: role}
@@ -278,16 +280,16 @@ type inround =
   ; previousWrongGuess: string option
   ; receivingDrawingCmd: (DrawingCmd.t -> unit) ref }
 
-type afterround = {winner: string option}
+type afterround = {didWin: bool option}
 
 type gamestate =
-  | Invalid
+  | Invalid of string
   | WaitForRoomId
-  | WaitForGameStart of room
-  | WaitForRoundStart of round
-  | InRound of round * inround
-  | AfterRound of round * afterround
-  | AfterGame of string option array
+  | WaitForGameStart of room * highscores
+  | WaitForRoundStart of round * highscores
+  | InRound of round * inround * highscores
+  | AfterRound of round * afterround * highscores
+  | AfterGame of highscores
 
 let atoi s = try Some (int_of_string s) with Failure _ -> None
 
@@ -317,7 +319,8 @@ end = struct
   let create = function
     | NewGame _ -> WaitForRoomId
     | JoinGame (_, rid) ->
-        WaitForGameStart {rid; participants= [||]; specifiedRounds= None}
+        WaitForGameStart
+          ({rid; participants= [||]; specifiedRounds= None}, [||])
 
 
   let transition st js =
@@ -325,68 +328,99 @@ end = struct
     match ((js |> JD.(field "tag" JD.string)), st) with
     | "TellRoomId", WaitForRoomId ->
         WaitForGameStart
-          { rid= (js |> JD.(field "contents" int))
-          ; participants= [||]
-          ; specifiedRounds= None }
-    | "AnnouncePlayers", WaitForGameStart room ->
+          ( { rid= (js |> JD.(field "contents" int))
+            ; participants= [||]
+            ; specifiedRounds= None }
+          , [||] )
+    | "AnnouncePlayers", WaitForGameStart (room, _) ->
         WaitForGameStart
-          { room with
-            participants= js |> JD.field "contents" (JD.array JD.string) }
-    | "AnnounceRound", (WaitForGameStart _ | AfterRound (_, _)) ->
+          ( { room with
+              participants= js |> JD.field "contents" (JD.array JD.string) }
+          , [||] )
+    | ( "AnnounceRound"
+      , (WaitForGameStart (_, highscores) | AfterRound (_, _, highscores)) ) ->
         WaitForRoundStart
-          (let index, drawer =
-             js |> JD.(field "contents" (tuple2 JD.int JD.string))
-           in
-           {index; drawer; role= Guesser})
-    | "TellMayStartRound", WaitForRoundStart round ->
-        WaitForRoundStart {round with role= Drawer}
-    | "TellDrawerWord", WaitForRoundStart round when round.role = Drawer ->
+          ( (let index, drawer =
+               js |> JD.(field "contents" (tuple2 JD.int JD.string))
+             in
+             {index; drawer; role= Guesser})
+          , highscores )
+    | "TellMayStartRound", WaitForRoundStart (round, highscores) ->
+        WaitForRoundStart ({round with role= Drawer}, highscores)
+    | "TellDrawerWord", WaitForRoundStart (round, highscores)
+      when round.role = Drawer ->
         InRound
           ( round
-          , let word = js |> JD.field "contents" JD.string in
-            { word
-            ; secondsleft= 90
-            ; currentGuess= ""
-            ; previousWrongGuess= None
-            ; receivingDrawingCmd= ref (fun _ -> ()) } )
-    | "TellGuessersMaskedWord", WaitForRoundStart round
+          , (let word = js |> JD.field "contents" JD.string in
+             { word
+             ; secondsleft= 90
+             ; currentGuess= ""
+             ; previousWrongGuess= None
+             ; receivingDrawingCmd= ref (fun _ -> ()) })
+          , highscores )
+    | "TellGuessersMaskedWord", WaitForRoundStart (round, highscores)
       when round.role = Guesser ->
         InRound
           ( round
-          , let word = js |> JD.field "contents" JD.string in
-            { word
-            ; secondsleft= 90
-            ; currentGuess= ""
-            ; previousWrongGuess= None
-            ; receivingDrawingCmd= ref (fun _ -> ()) } )
-    | "TellGuessersMaskedWord", InRound (round, inround)
+          , (let word = js |> JD.field "contents" JD.string in
+             { word
+             ; secondsleft= 90
+             ; currentGuess= ""
+             ; previousWrongGuess= None
+             ; receivingDrawingCmd= ref (fun _ -> ()) })
+          , highscores )
+    | "TellGuessersMaskedWord", InRound (round, inround, highscores)
       when round.role = Guesser ->
         InRound
           ( round
-          , let word = js |> JD.field "contents" JD.string in
-            {inround with word} )
-    | "AnnounceTimeLeft", InRound (round, inround) ->
+          , (let word = js |> JD.field "contents" JD.string in
+             {inround with word})
+          , highscores )
+    | "AnnounceTimeLeft", InRound (round, inround, highscores) ->
         InRound
-          (round, {inround with secondsleft= js |> JD.field "contents" JD.int})
-    | "ReplyGuessIncorrect", InRound (round, inround) ->
+          ( round
+          , {inround with secondsleft= js |> JD.field "contents" JD.int}
+          , highscores )
+    | "AnnounceTimeLeft", (AfterRound (_, _, _) as ar) -> ar
+    | "ReplyGuessIncorrect", InRound (round, inround, highscores) ->
         InRound
           ( round
           , { inround with
               previousWrongGuess= Some (js |> JD.field "contents" JD.string)
-            ; currentGuess= "" } )
-    | "EndRoundWithWinner", InRound (round, _) ->
-        AfterRound (round, {winner= Some (js |> JD.field "contents" JD.string)})
-    | "EndRoundWithoutWinner", InRound (round, _) ->
-        AfterRound (round, {winner= None})
-    | "EndGameWithTally", AfterRound (_, _) ->
-        AfterGame (js |> JD.field "contents" (JD.array (JD.optional JD.string)))
-    | "RelayDrawingCmd", InRound (_, inround) -> (
+            ; currentGuess= "" }
+          , highscores )
+    | "ReplyGuessCorrect", InRound (round, _, highscores) ->
+        AfterRound (round, {didWin= Some true}, highscores)
+    | "EndRound", InRound (round, _, highscores) when round.role = Guesser ->
+        AfterRound (round, {didWin= Some false}, highscores)
+    | "EndRound", InRound (round, _, highscores) when round.role = Drawer ->
+        AfterRound (round, {didWin= None}, highscores)
+    | "EndRound", (AfterRound (_, _, _) as s) -> s
+    | "EndGame", AfterRound (_, _, highscores) -> AfterGame highscores
+    | "RelayDrawingCmd", InRound (_, inround, _) -> (
       match DrawingCmd.parse (js |> JD.field "contents" JD.string) with
       | Some cmd ->
           !(inround.receivingDrawingCmd) cmd ;
           st
-      | _ -> Invalid )
-    | _ -> Invalid
+      | _ -> Invalid "the DrawingCmd message could not be parsed" )
+    | "AnnounceScores", WaitForRoundStart (round, _) ->
+        WaitForRoundStart
+          ( round
+          , js |> JD.field "contents" (JD.array (JD.tuple2 JD.string JD.int))
+          )
+    | "AnnounceScores", InRound (round, inround, _) ->
+        InRound
+          ( round
+          , inround
+          , js |> JD.field "contents" (JD.array (JD.tuple2 JD.string JD.int))
+          )
+    | "AnnounceScores", AfterRound (round, afterround, _) ->
+        AfterRound
+          ( round
+          , afterround
+          , js |> JD.field "contents" (JD.array (JD.tuple2 JD.string JD.int))
+          )
+    | msg, _ -> Invalid ("unexpected message type " ^ msg)
 
 
   let makeUrl =
@@ -418,13 +452,16 @@ end = struct
               Update {state with st= transition state.st json}
           | UpdateRoundCountPreference specifiedRounds -> (
             match state.st with
-            | WaitForGameStart room ->
+            | WaitForGameStart (room, highscores) ->
                 Update
-                  {state with st= WaitForGameStart {room with specifiedRounds}}
+                  { state with
+                    st=
+                      WaitForGameStart ({room with specifiedRounds}, highscores)
+                  }
             | _ -> NoUpdate )
           | UpdateCurrentGuess guess ->
             match state.st with
-            | InRound (round, inround)
+            | InRound (round, inround, highscores)
               when String.length guess <= String.length inround.word ->
                 Update
                   { state with
@@ -432,7 +469,8 @@ end = struct
                       InRound
                         ( round
                         , { inround with
-                            currentGuess= Js.String.toLowerCase guess } ) }
+                            currentGuess= Js.String.toLowerCase guess }
+                        , highscores ) }
             | _ -> NoUpdate )
     ; didMount=
         (fun self ->
@@ -454,47 +492,47 @@ end = struct
           self.send (SetConnectionState (Connecting ws)) )
     ; render=
         (fun self ->
+          let renderScoreTally tally =
+            D.table_
+              (D.props ~className:"table" ())
+              [| D.thead_ (D.props ())
+                   [| D.tr_ (D.props ())
+                        [| D.th_ (D.props ()) [|string "Name"|]
+                        ; D.th_ (D.props ()) [|string "Score"|] |] |]
+              ; D.tbody_ (D.props ())
+                  (Js.Array.map
+                     (fun (n, s) ->
+                       D.tr_ (D.props ())
+                         [| D.th_ (D.props ()) [|string n|]
+                         ; D.th_ (D.props ()) [|string (string_of_int s)|] |]
+                       )
+                     tally) |]
+          in
           match (self.state.conn, self.state.st) with
           | (WillConnect | Connecting _), _ ->
               D.div_
                 (D.props ~className:"alert alert-primary" ~role:"alert" ())
                 [|string "Connecting to server..."|]
-          | _, AfterGame winners ->
+          | _, AfterGame scoreTally ->
               D.div_ (D.props ())
                 [| D.h1_
                      (D.props ~className:"display-4" ())
                      [|string "Game ended"|]
-                ; D.table_
-                    (D.props ~className:"table" ())
-                    [| D.thead_ (D.props ())
-                         [| D.tr_ (D.props ())
-                              [| D.th_ (D.props ()) [|string "Round #"|]
-                              ; D.th_ (D.props ()) [|string "Winner"|] |] |]
-                    ; D.tbody_ (D.props ())
-                        (Js.Array.mapi
-                           (fun w i ->
-                             D.tr_ (D.props ())
-                               [| D.th_ (D.props ())
-                                    [|string (string_of_int (i + 1))|]
-                               ; D.th_ (D.props ())
-                                   [| string
-                                        ( match w with
-                                        | Some ww -> ww
-                                        | None -> {j|—|j} ) |] |] )
-                           winners) |] |]
+                ; renderScoreTally scoreTally |]
           | ConnectionLost, _ ->
               D.div_
                 (D.props ~className:"alert alert-danger" ~role:"alert" ())
                 [|string "Connection lost. Sorry."|]
-          | _, Invalid ->
+          | _, Invalid e ->
               D.div_
                 (D.props ~className:"alert alert-danger" ~role:"alert" ())
-                [|string "Sorry, the server encountered an error."|]
+                [| string ("Sorry, the server encountered an error: " ^ e ^ ".")
+                |]
           | Connected _, WaitForRoomId ->
               D.div_
                 (D.props ~className:"alert alert-primary" ~role:"alert" ())
                 [|string "Waiting for the server to tell us the Game PIN."|]
-          | Connected ws, WaitForGameStart room ->
+          | Connected ws, WaitForGameStart (room, _) ->
               let roundSelectionUi =
                 match gametype with
                 | JoinGame _ -> null
@@ -596,7 +634,7 @@ end = struct
                            ())
                         [|string "Start Game Now"|]
                   | _ -> null |]
-          | Connected ws, WaitForRoundStart round ->
+          | Connected ws, WaitForRoundStart (round, _) ->
               D.div_ (D.props ())
                 [| D.h2_ (D.props ())
                      [|string ("Round " ^ string_of_int (round.index + 1))|]
@@ -616,7 +654,51 @@ end = struct
                              sendServer ws "ToldStartRound" None )
                            ())
                         [|string "Ready To Draw!"|] |]
-          | Connected ws, InRound (round, inround) ->
+          | Connected ws, InRound (round, inround, highscores) ->
+              let guessingUi =
+                match round.role with
+                | Drawer -> null
+                | Guesser ->
+                    let previousGuessFeedback =
+                      match inround.previousWrongGuess with
+                      | None -> null
+                      | Some wrong ->
+                          D.div_
+                            (D.props ~className:"alert alert-danger" ())
+                            [| string
+                                 {j|Sorry, “$wrong” is wrong. Try Again.|j}
+                            |]
+                    in
+                    D.div_ (D.props ())
+                      [| previousGuessFeedback
+                      ; D.div_
+                          (D.props ~className:"input-group" ())
+                          [| D.input_
+                               (D.props ~type_:"text" ~className:"form-control"
+                                  ~value:inround.currentGuess
+                                  ~style:
+                                    (D.Style.make ~textTransform:"uppercase" ())
+                                  ~onChange:(fun e ->
+                                    self.send
+                                      (UpdateCurrentGuess (D.targetVal e)) )
+                                  ~placeholder:"Type a guess here" ())
+                               [||]
+                          ; D.div_
+                              (D.props ~className:"input-group-append" ())
+                              [| D.button_
+                                   (D.props
+                                      ~disabled:
+                                        ( String.length inround.currentGuess
+                                        != String.length inround.word )
+                                      ~className:"btn btn-primary"
+                                      ~onClick:(fun _ ->
+                                        sendServer ws "GotGuess"
+                                          (Some
+                                             (Js.Json.string
+                                                inround.currentGuess)) )
+                                      ~type_:"button" ())
+                                   [|string "Guess!"|] |] |] |]
+              in
               D.div_ (D.props ())
                 [| D.h2_ (D.props ())
                      [| string "Round "
@@ -654,55 +736,17 @@ end = struct
                               )
                             ~receiveDrawingCmd:inround.receivingDrawingCmd [||])
                     |]
-                ; match round.role with
-                  | Drawer -> null
-                  | Guesser ->
-                      let previousGuessFeedback =
-                        match inround.previousWrongGuess with
-                        | None -> null
-                        | Some wrong ->
-                            D.div_
-                              (D.props ~className:"alert alert-danger" ())
-                              [|string {j|Sorry, “$wrong” is wrong. Try Again.|j}|]
-                      in
-                      D.div_ (D.props ())
-                        [| previousGuessFeedback
-                        ; D.div_
-                            (D.props ~className:"input-group" ())
-                            [| D.input_
-                                 (D.props ~type_:"text"
-                                    ~className:"form-control"
-                                    ~value:inround.currentGuess
-                                    ~style:
-                                      (D.Style.make ~textTransform:"uppercase"
-                                         ())
-                                    ~onChange:(fun e ->
-                                      self.send
-                                        (UpdateCurrentGuess (D.targetVal e)) )
-                                    ~placeholder:"Type a guess here" ())
-                                 [||]
-                            ; D.div_
-                                (D.props ~className:"input-group-append" ())
-                                [| D.button_
-                                     (D.props
-                                        ~disabled:
-                                          ( String.length inround.currentGuess
-                                          != String.length inround.word )
-                                        ~className:"btn btn-primary"
-                                        ~onClick:(fun _ ->
-                                          sendServer ws "GotGuess"
-                                            (Some
-                                               (Js.Json.string
-                                                  inround.currentGuess)) )
-                                        ~type_:"button" ())
-                                     [|string "Guess!"|] |] |] |] |]
-          | Connected ws, AfterRound (round, afterround) ->
+                ; guessingUi
+                ; renderScoreTally highscores |]
+          | Connected ws, AfterRound (round, afterround, highscores) ->
               D.div_ (D.props ())
                 [| D.h1_
                      (D.props ~className:"display-4" ())
-                     [| match afterround.winner with
-                        | None -> string "No one guessed correctly :("
-                        | Some w -> string {j|Congrats, $w!|j} |]
+                     [| string
+                          ( match afterround.didWin with
+                          | None -> "Thanks for drawing!"
+                          | Some true -> "Congrats!"
+                          | Some false -> "You didn't guess corrctly :(" ) |]
                 ; D.p_
                     (D.props ~className:"lead" ())
                     [| string
@@ -713,6 +757,7 @@ end = struct
                     [| string
                          "Catch a breath, reflect on the experience, and maybe move on!"
                     |]
+                ; renderScoreTally highscores
                 ; match round.role with
                   | Guesser -> null
                   | Drawer ->
