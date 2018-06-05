@@ -842,6 +842,11 @@ end = struct
                                       ( self.state.nick
                                       , int_of_string self.state.rid ))) )
                             ~type_:"button"
+                            ~disabled:
+                              ( match atoi self.state.rid with
+                              | Some rid when rid >= 1000000 && rid <= 9999999 ->
+                                  false
+                              | _ -> true )
                             ~className:"btn btn-primary btn-lg btn-block" ())
                          [|string "Join Game"|] |]
                | InGame gametype -> element (Game.make ~gametype [||]) |] ) }
