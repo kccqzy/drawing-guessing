@@ -663,7 +663,7 @@ end = struct
                         | Some wrong ->
                             D.div_
                               (D.props ~className:"alert alert-danger" ())
-                              [|string {j|"$wrong" is wrong. Try Again.|j}|]
+                              [|string {j|Sorry, “$wrong” is wrong. Try Again.|j}|]
                       in
                       D.div_ (D.props ())
                         [| previousGuessFeedback
