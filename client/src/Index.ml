@@ -265,7 +265,7 @@ end
 
 type gametype = NewGame of string | JoinGame of string * int
 
-type room = {rid: int; participants: string array}
+type room = {rid: int; participants: string array; specifiedRounds: int option}
 
 type role = Drawer | Guesser
 
@@ -290,6 +290,8 @@ type gamestate =
   | AfterRound of round * afterround
   | AfterGame of string option array
 
+let atoi s = try Some (int_of_string s) with Failure _ -> None
+
 module Game : sig
   type state
 
@@ -309,12 +311,14 @@ end = struct
     | SetConnectionState of connectionstate
     | TransitionGameStateByServer of Js.Json.t
     | UpdateCurrentGuess of string
+    | UpdateRoundCountPreference of int option
 
   let component = reducerComponent "Game"
 
   let create = function
     | NewGame _ -> WaitForRoomId
-    | JoinGame (_, rid) -> WaitForGameStart {rid; participants= [||]}
+    | JoinGame (_, rid) ->
+        WaitForGameStart {rid; participants= [||]; specifiedRounds= None}
 
 
   let transition st js =
@@ -322,7 +326,9 @@ end = struct
     match ((js |> JD.(field "tag" JD.string)), st) with
     | "TellRoomId", WaitForRoomId ->
         WaitForGameStart
-          {rid= (js |> JD.(field "contents" int)); participants= [||]}
+          { rid= (js |> JD.(field "contents" int))
+          ; participants= [||]
+          ; specifiedRounds= None }
     | "AnnouncePlayers", WaitForGameStart room ->
         WaitForGameStart
           { room with
@@ -406,6 +412,12 @@ end = struct
           | SetConnectionState conn -> Update {state with conn}
           | TransitionGameStateByServer json ->
               Update {state with st= transition state.st json}
+          | UpdateRoundCountPreference specifiedRounds -> (
+            match state.st with
+            | WaitForGameStart room ->
+                Update
+                  {state with st= WaitForGameStart {room with specifiedRounds}}
+            | _ -> NoUpdate )
           | UpdateCurrentGuess guess ->
             match state.st with
             | InRound (round, inround)
@@ -479,6 +491,72 @@ end = struct
                 (D.props ~className:"alert alert-primary" ~role:"alert" ())
                 [|string "Waiting for the server to tell us the Game PIN."|]
           | Connected ws, WaitForGameStart room ->
+              let roundSelectionUi =
+                match gametype with
+                | JoinGame _ -> null
+                | NewGame _ ->
+                    D.div_
+                      (D.props ~className:"form-group" ())
+                      [| D.label_
+                           (D.props ~htmlFor:"rounds" ())
+                           [|string "Number of Rounds to Play"|]
+                      ; D.div_
+                          (D.props ~className:"input-group" ())
+                          [| D.div_
+                               (D.props ~className:"input-group-prepend" ())
+                               [| D.button_
+                                    (D.props
+                                       ~className:
+                                         ( "btn btn-outline-secondary"
+                                         ^
+                                         match room.specifiedRounds with
+                                         | None -> " active"
+                                         | _ -> "" )
+                                       ~type_:"button"
+                                       ~onClick:(fun _ ->
+                                         self.send
+                                           (UpdateRoundCountPreference None) )
+                                       ())
+                                    [|string "Automatic"|]
+                               ; D.button_
+                                   (D.props
+                                      ~className:
+                                        ( "btn btn-outline-secondary"
+                                        ^
+                                        match room.specifiedRounds with
+                                        | Some _ -> " active"
+                                        | _ -> "" )
+                                      ~onClick:(fun _ ->
+                                        self.send
+                                          (UpdateRoundCountPreference (Some 0))
+                                        )
+                                        (* This zero will be interpreted as an empty string. *)
+                                      ~type_:"button" ())
+                                   [|string "Manual"|] |]
+                          ; D.input_
+                              (D.props ~type_:"text" ~className:"form-control"
+                                 ~id:"rounds" ~placeholder:"# of rounds"
+                                 ~value:
+                                   ( match room.specifiedRounds with
+                                   | None | Some 0 -> ""
+                                   | Some x -> string_of_int x )
+                                 ~disabled:
+                                   (Belt.Option.isNone room.specifiedRounds)
+                                 ~onChange:(fun e ->
+                                   let tv = D.targetVal e in
+                                   if tv == "" then
+                                     self.send
+                                       (UpdateRoundCountPreference (Some 0))
+                                   else
+                                     match atoi tv with
+                                     | Some v when v > 0 ->
+                                         self.send
+                                           (UpdateRoundCountPreference (Some v))
+                                     | _ -> ()
+                                   (* Unparsable or nonpositive *) )
+                                 ())
+                              [||] |] |]
+              in
               D.div_ (D.props ())
                 [| D.h2_ (D.props ()) [|string {j|Get Ready…|j}|]
                 ; D.div_
@@ -486,6 +564,7 @@ end = struct
                     [| string
                          ( "Invite your friends to join the game! Use this Game PIN: "
                          ^ string_of_int room.rid ) |]
+                ; roundSelectionUi
                 ; D.div_ (D.props ())
                     [| D.p_ (D.props ()) [|string "Current players:"|]
                     ; D.ul_ (D.props ())
@@ -497,13 +576,19 @@ end = struct
                       D.button_
                         (D.props ~type_:"button"
                            ~className:"btn btn-primary btn-lg btn-block"
+                           ~disabled:
+                             ( match room.specifiedRounds with
+                             | Some 0 -> true
+                             | _ -> false )
                            ~onClick:(fun _ ->
                              sendServer ws "ToldStartGame"
                                (Some
                                   (Js.Json.number
                                      (float_of_int
-                                        (2 * Array.length room.participants))))
-                             )
+                                        ( match room.specifiedRounds with
+                                        | None ->
+                                            2 * Array.length room.participants
+                                        | Some v -> v )))) )
                            ())
                         [|string "Start Game Now"|]
                   | _ -> null |]
@@ -668,7 +753,6 @@ end = struct
           | DidUpdateRoomId rid -> Update {state with rid} )
     ; render=
         (fun self ->
-          let atoi s = try Some (int_of_string s) with Failure _ -> None in
           D.div_
             (D.props ~id:"Page" ~className:"container-fluid" ())
             [| match self.state.stage with
