@@ -441,12 +441,15 @@ end = struct
 
   let makeUrl =
     let open Js.Global in
+    let open Webapi.Dom in
+    let hostname = LocationRe.hostname (WindowRe.location window) in
     function
       | NewGame nick ->
-          "ws://127.0.0.1:8080/new-room?nickname=" ^ encodeURIComponent nick
+          "ws://" ^ hostname ^ ":8080/new-room?nickname="
+          ^ encodeURIComponent nick
       | JoinGame (nick, rid) ->
-          "ws://127.0.0.1:8080/join-room?nickname=" ^ encodeURIComponent nick
-          ^ "&room_id=" ^ string_of_int rid
+          "ws://" ^ hostname ^ ":8080/join-room?nickname="
+          ^ encodeURIComponent nick ^ "&room_id=" ^ string_of_int rid
 
 
   let sendServer ws tag contents =
