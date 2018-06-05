@@ -26,7 +26,7 @@ import qualified Network.Wai.Handler.WebSockets as WaiWS
 import Network.Wai.Middleware.RequestLogger (logStdout)
 import Network.WebSockets
 import System.Random.MWC
-import System.Random.MWC.Distributions (uniformShuffle)
+import System.Random.MWC.Distributions (uniformPermutation, uniformShuffle)
 import Text.Read (readMaybe)
 import Types
 import qualified WordLists
@@ -183,6 +183,14 @@ data ClientConn = ClientConn
   , name :: T.Text
   }
 
+revealLetter :: T.Text -> T.Text -> Int -> T.Text
+revealLetter masked orig i = T.pack (zipWith3 selecting (T.unpack masked) (T.unpack orig) [0 ..])
+  where
+    selecting :: Char -> Char -> Int -> Char
+    selecting a b j
+      | i == j = b
+      | otherwise = a
+
 beginGame :: TVar ServerState -> Int -> Int -> IO ()
 beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
   clients <- (rClients . (IM.! rid)) <$> readTVarIO st
@@ -230,10 +238,27 @@ beginGame st rid rounds = withSystemRandom . asGenIO $ \rng -> do
       _ -> throwIO (ErrorCall "Malicious client: State violation.")
 
     sendDrawer (TellDrawerWord wd)
-    broadcastGuessers (AnnounceWordLength (T.length wd))
 
-    let timerThread =
-          forM_ (enumFromThenTo 89 88 0) $ \seconds -> do
+    -- The masked word is for guessers.
+    revealings <- V.take 2 <$> uniformPermutation (T.length wd) rng
+    let masked = T.replicate (T.length wd) "_"
+        revealing1 = revealings V.! 0
+        revealing2 = revealings V.! 1
+        masked1 = revealLetter masked wd revealing1
+        masked2 = revealLetter masked1 wd revealing2
+
+    broadcastGuessers (TellGuessersMaskedWord masked)
+
+    let timerThread = do
+          forM_ (enumFromThenTo 89 88 60) $ \seconds -> do
+            threadDelay 1000000
+            broadcast (AnnounceTimeLeft seconds)
+          broadcastGuessers (TellGuessersMaskedWord masked1)
+          forM_ (enumFromThenTo 59 58 30) $ \seconds -> do
+            threadDelay 1000000
+            broadcast (AnnounceTimeLeft seconds)
+          broadcastGuessers (TellGuessersMaskedWord masked2)
+          forM_ (enumFromThenTo 29 28 0) $ \seconds -> do
             threadDelay 1000000
             broadcast (AnnounceTimeLeft seconds)
 

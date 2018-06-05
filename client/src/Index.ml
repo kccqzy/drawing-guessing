@@ -272,8 +272,7 @@ type role = Drawer | Guesser
 type round = {index: int; drawer: string; role: role}
 
 type inround =
-  { wordlength: int
-  ; word: string
+  { word: string
   ; secondsleft: int
   ; currentGuess: string
   ; previousWrongGuess: string option
@@ -346,21 +345,26 @@ end = struct
           ( round
           , let word = js |> JD.field "contents" JD.string in
             { word
-            ; wordlength= String.length word
             ; secondsleft= 90
             ; currentGuess= ""
             ; previousWrongGuess= None
             ; receivingDrawingCmd= ref (fun _ -> ()) } )
-    | "AnnounceWordLength", WaitForRoundStart round when round.role = Guesser ->
+    | "TellGuessersMaskedWord", WaitForRoundStart round
+      when round.role = Guesser ->
         InRound
           ( round
-          , let wordlength = js |> JD.field "contents" JD.int in
-            { word= String.make wordlength '_'
-            ; wordlength
+          , let word = js |> JD.field "contents" JD.string in
+            { word
             ; secondsleft= 90
             ; currentGuess= ""
             ; previousWrongGuess= None
             ; receivingDrawingCmd= ref (fun _ -> ()) } )
+    | "TellGuessersMaskedWord", InRound (round, inround)
+      when round.role = Guesser ->
+        InRound
+          ( round
+          , let word = js |> JD.field "contents" JD.string in
+            {inround with word} )
     | "AnnounceTimeLeft", InRound (round, inround) ->
         InRound
           (round, {inround with secondsleft= js |> JD.field "contents" JD.int})
@@ -421,7 +425,7 @@ end = struct
           | UpdateCurrentGuess guess ->
             match state.st with
             | InRound (round, inround)
-              when String.length guess <= inround.wordlength ->
+              when String.length guess <= String.length inround.word ->
                 Update
                   { state with
                     st=
@@ -683,7 +687,7 @@ end = struct
                                      (D.props
                                         ~disabled:
                                           ( String.length inround.currentGuess
-                                          != inround.wordlength )
+                                          != String.length inround.word )
                                         ~className:"btn btn-primary"
                                         ~onClick:(fun _ ->
                                           sendServer ws "GotGuess"

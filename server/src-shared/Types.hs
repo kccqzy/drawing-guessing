@@ -28,7 +28,7 @@ data Msg
   | AnnounceRound Int
                   T.Text -- ^ Round number and drawer
   | TellDrawerWord T.Text
-  | AnnounceWordLength Int
+  | TellGuessersMaskedWord T.Text
   | GotDrawingCmd T.Text
   | RelayDrawingCmd T.Text
   | GotGuess T.Text
