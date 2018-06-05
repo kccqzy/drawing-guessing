@@ -291,6 +291,15 @@ type gamestate =
   | AfterRound of round * afterround * highscores
   | AfterGame of highscores
 
+let print_gamestate = function
+  | WaitForRoundStart (_, _) -> "WaitForRoundStart"
+  | WaitForRoomId -> "WaitForRoomId"
+  | WaitForGameStart (_, _) -> "WaitForGameStart"
+  | InRound (_, _, _) -> "InRound"
+  | AfterRound (_, _, _) -> "AfterRound"
+  | AfterGame _ -> "AfterGame"
+  | Invalid _ -> "Invalid"
+
 let atoi s = try Some (int_of_string s) with Failure _ -> None
 
 module Game : sig
@@ -376,12 +385,13 @@ end = struct
           , (let word = js |> JD.field "contents" JD.string in
              {inround with word})
           , highscores )
+    | "TellGuessersMaskedWord", AfterRound (_, _, _) -> st
     | "AnnounceTimeLeft", InRound (round, inround, highscores) ->
         InRound
           ( round
           , {inround with secondsleft= js |> JD.field "contents" JD.int}
           , highscores )
-    | "AnnounceTimeLeft", (AfterRound (_, _, _) as ar) -> ar
+    | "AnnounceTimeLeft", AfterRound (_, _, _) -> st
     | "ReplyGuessIncorrect", InRound (round, inround, highscores) ->
         InRound
           ( round
@@ -395,7 +405,7 @@ end = struct
         AfterRound (round, {didWin= Some false}, highscores)
     | "EndRound", InRound (round, _, highscores) when round.role = Drawer ->
         AfterRound (round, {didWin= None}, highscores)
-    | "EndRound", (AfterRound (_, _, _) as s) -> s
+    | "EndRound", AfterRound (_, _, _) -> st
     | "EndGame", AfterRound (_, _, highscores) -> AfterGame highscores
     | "RelayDrawingCmd", InRound (_, inround, _) -> (
       match DrawingCmd.parse (js |> JD.field "contents" JD.string) with
@@ -420,7 +430,10 @@ end = struct
           , afterround
           , js |> JD.field "contents" (JD.array (JD.tuple2 JD.string JD.int))
           )
-    | msg, _ -> Invalid ("unexpected message type " ^ msg)
+    | _, Invalid m -> Invalid m
+    | msg, st ->
+        Invalid
+          ("unexpected message type " ^ msg ^ " in state " ^ print_gamestate st)
 
 
   let makeUrl =
@@ -746,7 +759,8 @@ end = struct
                           ( match afterround.didWin with
                           | None -> "Thanks for drawing!"
                           | Some true -> "Congrats!"
-                          | Some false -> "You didn't guess corrctly :(" ) |]
+                          | Some false -> "You didn't guess correctly :(" )
+                     |]
                 ; D.p_
                     (D.props ~className:"lead" ())
                     [| string
