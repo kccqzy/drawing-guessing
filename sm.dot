@@ -1,0 +1,29 @@
+digraph G {
+
+  node [color="pink",  style="filled"]
+  edge [fontsize=12]
+
+  JustJoinedGame
+  JustCreatedGame
+  WaitForGameStart
+  WaitForRoomId
+  InRound
+
+  { rank = same; JustJoinedGame; JustCreatedGame; }
+
+  JustJoinedGame -> WaitForGameStart
+  JustCreatedGame -> WaitForRoomId
+  WaitForRoomId -> WaitForGameStart [label = "Server to Clients: TellRoomId"]
+  WaitForGameStart -> WaitForGameStart [label = "Server to Clients: AnnouncePlayers"]
+  WaitForGameStart -> WaitForRoundStart [label = "Game Master to Server: ToldStartGame\nServer to Clients: AnnounceRound" ]
+  WaitForRoundStart -> WaitForRoundStart [label = "Server to Drawer: TellMayStartRound"]
+  WaitForRoundStart -> InRound [label = "Drawer to Server: ToldStartRound\nServer to Drawer: TellDrawerWord\nServer to Guessers: TellGuessersMaskedWord"]
+  InRound:nw -> InRound [label = "Drawer to Server: GotDrawingCmd\nServer to Guessers: RelayDrawingCmd"]
+  InRound:ne -> InRound [label = "Guesser to Server: GotGuess\nServer to Guesser: ReplyGuessIncorrect"]
+  InRound:se -> AfterRound:e [label = "Drawer to Server: GotGuess\nServer to Guesser: ReplyGuessCorrect\nServer to Clients: AnnounceScores"]
+  InRound:sw -> AfterRound:w [xlabel = "Server to Clients: EndRound"]
+
+  AfterRound -> AfterGame [label = "Server to Clients: EndGame"]
+  AfterRound:sw -> WaitForRoundStart:w [xlabel = "Server to Clients: AnnounceRound"]
+
+}
