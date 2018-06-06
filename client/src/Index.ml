@@ -509,6 +509,14 @@ end = struct
           |> ignore ;
           self.onUnmount (fun _ -> WebSocket.close () ws) ;
           self.send (SetConnectionState (Connecting ws)) )
+    ; didUpdate=
+        (fun s ->
+          match (s.oldSelf.state.st, s.newSelf.state) with
+          | Invalid _, _ -> ()
+          | _, {conn= Connected ws; st= Invalid _} ->
+              WebSocket.close () ws ;
+              s.newSelf.send (SetConnectionState ConnectionLost)
+          | _ -> () )
     ; render=
         (fun self ->
           let renderScoreTally tally =
