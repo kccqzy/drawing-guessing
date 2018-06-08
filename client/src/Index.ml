@@ -416,6 +416,7 @@ end = struct
           !(inround.receivingDrawingCmd) cmd ;
           st
       | _ -> Invalid "the DrawingCmd message could not be parsed" )
+    | "RelayDrawingCmd", AfterRound (_, _, _) -> st
     | "AnnounceScores", WaitForRoundStart (round, _) ->
         WaitForRoundStart
           ( round
