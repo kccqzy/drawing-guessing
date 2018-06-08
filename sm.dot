@@ -1,7 +1,7 @@
 digraph G {
 
-  node [fontsize=18, fontname="Iowan Old Style"]
-  edge [fontsize=12, fontname="Iowan Old Style"]
+  node [fontsize=18, fontname="Times"]
+  edge [fontsize=12, fontname="Times"]
 
   { rank = same; JustJoinedGame; JustCreatedGame; }
 
@@ -14,11 +14,14 @@ digraph G {
   WaitForRoundStart -> InRound [label = "Drawer → Server: ToldStartRound\nServer → Drawer: TellDrawerWord\nServer → Guessers: TellGuessersMaskedWord"]
   InRound:nw -> InRound [label = "Drawer → Server: GotDrawingCmd\nServer → Guessers: RelayDrawingCmd"]
   InRound:ne -> InRound [label = "Guesser → Server: GotGuess\nServer → Guesser: ReplyGuessIncorrect"]
-  InRound:se -> AfterRound:e [label = "Drawer → Server: GotGuess\nServer → Guesser: ReplyGuessCorrect\nServer → Clients: AnnounceScores"]
-  InRound:sw -> AfterRound:w [xlabel = "Server → Clients: EndRound"]
+  InRound:se -> AfterRound:ne [label = "Drawer → Server: GotGuess\nServer → Guesser: ReplyGuessCorrect\nServer → Clients: AnnounceScores"]
+  InRound:sw -> AfterRound:nw [xlabel = "Server → Clients: EndRound"]
+  
+  AfterRound:ne -> AfterRound:se [label = "Server → Guessers: TellGuessersMaskedWord"]
+  AfterRound:nw -> AfterRound:sw [label = "Server → Guessers: RelayDrawingCmd"]
 
   AfterRound -> AfterGame [label = "Server → Clients: EndGame"]
-  AfterRound:se -> WaitForRoundStart:se [label = "Server → Clients: AnnounceRound"]
+  AfterRound:s -> WaitForRoundStart:se [label = "Server → Clients: AnnounceRound"]
 
   
 }
