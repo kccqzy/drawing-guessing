@@ -1,15 +1,6 @@
 open ReasonReact
 open WebSockets
 
-(* A statement component. *)
-type statelessComp =
-  ( stateless
-  , stateless
-  , noRetainedProps
-  , noRetainedProps
-  , actionless )
-  componentSpec
-
 (* A reducer component. *)
 type ('s, 'a) reducerComp =
   ('s, 's, noRetainedProps, noRetainedProps, 'a) componentSpec
