@@ -46,3 +46,14 @@ the command line by
 
 In the future, it is possible that the same server that serves WebSocket
 connections will serve the static assets.
+
+## Supported Platforms
+
+The server code should work on all platforms supported by GHC. The client code
+is tested on Safari bundled with iOS 11.1. It is known that iOS 11.3+ contains
+a change with respect to passive touch event handlers. As of this writing,
+React [does not yet supported
+these](https://github.com/facebook/react/issues/6436) so it is currently
+recommended not to use iOS 11.3+. An alternative is to not use React to add
+the event listeners, but to do it through DOM with a React ref (since we need
+a React ref anyways), but this is not yet implemented.
